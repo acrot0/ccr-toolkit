@@ -42,6 +42,10 @@ The behaviour is intentional and the maintainer's answer is "don't use global sc
 
 `ccr-takeover` audits the backup chain and tells you **which snapshot CCR would pick, and whether it is healthy** — before it bites.
 
+> **Background reading:** [Every time I checked the config file, it was correct. Every time I looked away, it broke again.](docs/why-ccr-reverts-your-config.md)
+> — how these rules were reverse-engineered from the bundled `cli.js`, the two that are
+> easy to get wrong, and how to check your own setup in 30 seconds.
+
 ---
 
 ## Install
