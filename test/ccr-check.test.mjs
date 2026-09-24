@@ -1,9 +1,10 @@
 /**
- * ccr-check 的单测。
+ * Unit tests for ccr-check.
  *
- * 断言来自 2026-09-13 对 CCR 3.1.0 配置与三个 sqlite 的真实取证：
- * 所有 fixture 数值（fallback off、598MB 文件 13.5MB 有效、省略标记位置 80033、
- * status=0 的 420 条）都是从本机数据抄下来的，不是构造的假数。
+ * The assertions come from a real forensic pass over CCR 3.1.0 config and three
+ * sqlite files: every fixture number (fallback off, a 598MB file with 13.5MB
+ * live, elision marker at offset 80033, 420 rows with status=0) was copied out
+ * of live local data — none of it is invented.
  */
 import { describe, it, expect } from "vitest";
 import {
@@ -48,7 +49,7 @@ describe("checkFallback", () => {
   it("should pass for model-chain but warn about cache identity", () => {
     const c = checkFallback({ mode: "model-chain", models: ["a/b"], retryCount: 3 });
     expect(c.level).toBe("warn");
-    expect(c.detail).toMatch(/缓存|cache/i);
+    expect(c.detail).toMatch(/cache/i);
   });
 
   it("should warn when the config is missing entirely", () => {
@@ -76,7 +77,7 @@ describe("checkProfile", () => {
   });
 
   it("should note when main and sonnet point at the same model", () => {
-    // 实测：两个槽都是 gamma/model-g2，后台验证失去了独立性
+    // Measured: both slots point at gamma/model-g2, so background verification loses independence
     const c = checkProfile(good);
     expect(c.detail).toMatch(/sonnet/);
   });
@@ -84,13 +85,13 @@ describe("checkProfile", () => {
   it("should warn when a slot points at a model whose name announces its own expiry", () => {
     const c = checkProfile({ ...good, opusModel: "alpha/model-b-1-expires-on-0910" });
     expect(c.level).toBe("warn");
-    expect(c.detail).toMatch(/过期|expires/);
+    expect(c.detail).toMatch(/expires/i);
   });
 });
 
 describe("checkBloat", () => {
   it("should flag a file that is mostly free pages", () => {
-    // 实测 request-logs.sqlite：598.1MB 文件 / 13.5MB 有效
+    // Measured on request-logs.sqlite: 598.1MB file / 13.5MB live
     const c = checkBloat({ label: "request-logs", fileBytes: 598.1 * 1048576, liveBytes: 13.5 * 1048576 });
     expect(c.level).toBe("warn");
     expect(c.detail).toMatch(/VACUUM/);
@@ -107,7 +108,7 @@ describe("checkBloat", () => {
 
 describe("checkPreviewLoss", () => {
   it("should flag when most bodies are stored only as a preview", () => {
-    // 实测 99/112 含省略标记
+    // Measured: 99 of 112 contained the elision marker
     const texts = Array.from({ length: 112 }, (_, i) =>
       i < 99 ? 'x"... 511342 bytes omitted from preview ..."y' : '{"ok":1}');
     const c = checkPreviewLoss(texts);
@@ -137,16 +138,19 @@ describe("checkLoggingGap", () => {
 });
 
 /**
- * 动因：2026-09-13 实测 494 条 429 只聚成 53 个独立事件，最大簇内 38 条且
- * 间隔 0~1 秒 —— 是并行 fan-out 爆发，不是 494 次独立失败。
- * 直接报原始条数会把问题夸大近 10 倍（我据此写过"429 ×171"的结论）。
- * 簇内间隔还能区分两种成因：秒级并发 = 客户端并行打爆 RPM；均匀间隔 = 顺序重试。
+ * Motivation: measured 494 rate-limit rows collapsing into only 53 distinct
+ * events, the largest cluster holding 38 rows at 0-1s gaps — that is a parallel
+ * fan-out burst, not 494 independent failures. Reporting raw rows inflates the
+ * problem roughly tenfold.
+ *
+ * The intra-cluster gap also separates the two causes: one-second gaps = the
+ * client blew the RPM limit in parallel; even gaps = sequential retry.
  */
 describe("clusterTimestamps / checkRateLimitBursts", () => {
   const at = (hhmmss) => `2026-09-11T${hhmmss}.000Z`;
 
   it("should collapse a parallel burst into one event", () => {
-    // 间隔 0~1 秒 = 并行爆发
+    // 0-1s gaps = a parallel burst
     const ts = ["05:11:17", "05:11:17", "05:11:18", "05:11:18", "05:11:19"].map(at);
     const c = clusterTimestamps(ts, 10);
     expect(c.events).toHaveLength(1);
@@ -164,7 +168,7 @@ describe("clusterTimestamps / checkRateLimitBursts", () => {
   });
 
   it("should label evenly spaced retries as sequential", () => {
-    // 30 秒间隔 = 顺序退避重试，不是并发
+    // 30s gaps = sequential retry with backoff, not concurrency
     const ts = ["05:00:00", "05:00:30", "05:01:00", "05:01:30"].map(at);
     const c = clusterTimestamps(ts, 60);
     expect(c.events[0].pattern).toBe("sequential");
@@ -186,7 +190,7 @@ describe("clusterTimestamps / checkRateLimitBursts", () => {
     const ts = Array.from({ length: 40 }, () => at("05:11:17"));
     const c = checkRateLimitBursts(ts);
     expect(c.level).toBe("warn");
-    expect(c.detail).toMatch(/并行|fan-out|并发/);
+    expect(c.detail).toMatch(/fan-out|burst/i);
   });
 
   it("should pass when there are no rate-limit events", () => {

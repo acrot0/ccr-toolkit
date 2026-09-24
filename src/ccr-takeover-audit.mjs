@@ -68,9 +68,12 @@ const REQUIRED_EVENTS = ["PreToolUse", "SessionStart", "PostToolUse", "Stop"];
 const isObj = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 
 /**
- * 从候选里取 CCR 会选中的那个：按名倒序（最新优先）取第一个 managed 的，
- * 全都不合格则回退 .ccr-original。对应源码的 J$e + X$e 组合。
- * 抽成纯函数是为了可单测——这条选择规则错了会静默选到坏快照。
+ * Pick the candidate CCR would choose: walk names in DESCENDING order
+ * (newest first) and take the first that is managed, falling back to
+ * .ccr-original if none qualify.
+ *
+ * Kept as a pure function so it can be unit-tested — get this selection rule
+ * wrong and the tool silently points at a broken snapshot.
  */
 export function pickRestoreCandidate(items) {
   const backups = items
@@ -83,7 +86,8 @@ export function pickRestoreCandidate(items) {
   return null;
 }
 
-/** 真威胁 = 有资格被选中（managed）且 hooks 坏。managed=否 的坏文件是惰性的。 */
+/** A real threat = eligible to be picked (managed) AND broken.
+ *  A broken file that is NOT managed is inert. */
 export function auditCandidates(items) {
   return items.filter((c) => c.managed && !c.hooksOk);
 }
@@ -151,12 +155,14 @@ function selectRestoreSource(file) {
 }
 
 /**
- * opencode 的 isManagedContent 判据与 zcode 不同 —— 它查 provider 段里的
- * 客户端标识头，而不是 provider id：
+ * opencode's managed check differs from zcode's — it looks for a client
+ * identifier header inside the provider section, not at the provider id:
  *   provider["claude-code-router"].options.headers["x-ccr-client"] === "opencode"
  *
- * 实测踩到过：手工把 model 改对后，CCR 用它自己的旧快照在两分钟内冲回旧值。
- * 这也是本工具存在的原因之一 —— 改 live 文件不够，要先看恢复源。
+ * Measured first-hand: after hand-editing the model to the right value, CCR
+ * restored an old snapshot over it within two minutes. Editing the live file is
+ * not enough — you have to inspect the restore sources, which is part of why
+ * this tool exists.
  */
 export function isManagedOpencode(text, id = PROVIDER_ID) {
   let cfg;
@@ -173,10 +179,12 @@ export function isManagedOpencode(text, id = PROVIDER_ID) {
 }
 
 /**
- * opencode 的健康判据：model 是否**经由 CCR 且指向期望模型**。
+ * opencode health: is `model` routed THROUGH CCR and pointing at the expected
+ * model?
  *
- * 期望模型由调用方传入（`expectedModel`，正则或字符串），不写死 —— 每个用户的
- * 主力模型不同，且会随上游改名而变化。不传则只检查「是否经由 CCR」。
+ * The expected model is supplied by the caller (`expectedModel`, a regex or a
+ * string) rather than hard-coded — every user's main model differs, and it
+ * changes whenever an upstream renames things. Omit it to check routing only.
  */
 export function opencodeHealth(text, expectedModel = null) {
   let cfg;
@@ -196,17 +204,17 @@ export function opencodeHealth(text, expectedModel = null) {
   const ok = viaCcr && matchesExpected && (!small || small === model);
   return {
     ok,
-    events: [model || "(无 model)"],
+    events: [model || "(no model)"],
     reason: ok
       ? ""
-      : `${viaCcr ? "" : "未经 CCR；"}model=${model || "(无)"}${
+      : `${viaCcr ? "" : "not routed via CCR; "}model=${model || "(none)"}${
           small && small !== model ? ` small_model=${small}` : ""
-        }${!matchesExpected && expectedModel ? `（期望匹配 ${expectedModel}）` : ""}`,
+        }${!matchesExpected && expectedModel ? ` (expected to match ${expectedModel})` : ""}`,
   };
 }
 
 /**
- * 审计一个 CCR 接管的 profile。
+ * Audit one CCR-managed profile.
  * managedOf / healthOf are supplied by the caller — zcode and opencode use
  * different predicates, but the "managed AND broken = real threat" rule is shared.
  */
@@ -236,7 +244,7 @@ function auditProfile({ file, managedOf, healthOf, label }) {
 
   result.threats = result.candidates.filter((c) => c.threat);
 
-  // 恢复会选中哪个：倒序第一个 managed 的
+  // Which one restore would pick: the first managed, walking in reverse
   const picked = candidates.find((p) => fs.existsSync(p) && managedOf(fs.readFileSync(p, "utf8")));
   result.wouldPick = picked ? path.basename(picked) : null;
   result.pickIsHealthy = picked ? healthOf(fs.readFileSync(picked, "utf8")).ok : null;
@@ -250,8 +258,9 @@ function auditProfile({ file, managedOf, healthOf, label }) {
 }
 
 /**
- * 内置的已知 profile 位置（相对 home，跨平台）。
- * 找不到就跳过，不报错 —— 用户没装那个 agent 是正常情况。
+ * Built-in known profile locations (relative to home, cross-platform).
+ * Missing ones are skipped without error — not having that agent installed is
+ * a normal state, not a problem.
  */
 const KNOWN_PROFILES = [
   { label: "zcode", rel: [".zcode", "cli", "config.json"], kind: "zcode" },
@@ -260,11 +269,12 @@ const KNOWN_PROFILES = [
 ];
 
 /**
- * 读取 CCR 自己的接管清单，据此决定审计哪些文件。
+ * Read CCR's own takeover manifest to decide which files to audit.
  *
- * CCR 把"我接管了哪些 profile"记在 `global-profile-takeover.json`。
- * 用它比硬编码路径可靠 —— 用户改过 profile 位置时也能跟上。
- * 读不到则回落到内置的已知位置。
+ * CCR records "which profiles I have taken over" in
+ * `global-profile-takeover.json`. Trusting that beats hard-coded paths — it
+ * still tracks correctly if the user moved a profile. If it cannot be read,
+ * fall back to the built-in known locations.
  */
 export function readTakeoverManifest(ccrHome) {
   const p = path.join(ccrHome, "global-profile-takeover.json");
@@ -276,7 +286,8 @@ export function readTakeoverManifest(ccrHome) {
   }
 }
 
-/** 从接管清单条目推 profile 描述；识别不了 agent 类型的返回 null。 */
+/** Derive a profile descriptor from a manifest entry; null if the agent type
+ *  is not one this tool covers. */
 export function profileFromManifestEntry(entry) {
   const file = entry.configFile || entry.settingsFile;
   if (!file) return null;
@@ -284,8 +295,9 @@ export function profileFromManifestEntry(entry) {
   const agent = String(entry.agent || "").toLowerCase();
   if (agent === "zcode") return { label: `zcode (${entry.id || "?"})`, file: resolved, kind: "zcode" };
   if (agent === "opencode") return { label: `opencode (${entry.id || "?"})`, file: resolved, kind: "opencode" };
-  // claude-code / codex 等走另一条恢复路径（settings.json 的 managed block），
-  // 判据不同，不在本工具的覆盖范围内 —— 显式跳过而非误判。
+  // claude-code / codex use a different restore mechanism (managed blocks in
+  // settings.json / config.toml) with different rules. They are outside this
+  // tool's scope — skip them explicitly rather than mis-judge them.
   return null;
 }
 
@@ -298,7 +310,7 @@ export function discoverProfiles(ccrHome, extra = []) {
     file: path.join(os.homedir(), ...k.rel),
     kind: k.kind,
   }));
-  // 清单优先（它反映 CCR 的真实接管状态），再用已知位置补齐
+  // Manifest first (it reflects CCR's real takeover state), then fill in from known locations
   const seen = new Set();
   const out = [];
   for (const p of [...fromManifest, ...known, ...extra]) {
@@ -322,7 +334,7 @@ function auditAll(opts = {}) {
         healthOf: p.kind === "opencode" ? (t) => opencodeHealth(t, opts.expectedOpencodeModel) : hooksHealth,
       }),
     )
-    // 文件不存在的 profile 直接不列 —— 没装那个 agent 不是"缺失"，是正常
+    // Do not list profiles whose file is absent — that is "not installed", not "missing"
     .filter((r) => r.exists);
 }
 

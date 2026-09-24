@@ -1,13 +1,17 @@
 /**
- * ccr-takeover-audit 判据单测。
+ * Unit tests for ccr-takeover-audit's decision rules.
  *
- * 这些用例锁定的是从 CCR 源码逆向出的规则（ccr-cli.js 的 `ute` / `J$e` / `X$e`），
- * 每条都对应一次真实的误判教训：
- *   - 「hooks 坏」不等于「有威胁」——必须同时 managed，否则 CCR 根本不读
- *   - 只有 `config.json.ccr-backup-*` 参与选择，`.bak-*` 不匹配 startsWith
- *   - 恢复取「倒序第一个通过 isManagedContent 的」，不是「最新的」
+ * These lock the rules reverse-engineered from CCR's source (the helpers in
+ * ccr-cli.js). Each one corresponds to a real misdiagnosis:
+ *   - "the hooks are broken" does NOT imply "there is a threat" — the snapshot
+ *     must ALSO be managed, or CCR never reads it at all
+ *   - only `config.json.ccr-backup-*` participates in selection; `.bak-*` does
+ *     not match the startsWith prefix
+ *   - restore takes "the first one passing isManagedContent, walking in
+ *     reverse", NOT "the newest"
  *
- * 判据若被改错，这些用例会红——这正是它们存在的意义。
+ * If someone changes a rule incorrectly, these turn red — which is precisely
+ * why they exist.
  */
 import { describe, it, expect } from "vitest";
 import os from "node:os";
@@ -39,8 +43,8 @@ const BROKEN_HOOKS = {
     PreToolUse: [{ hooks: [{ command: "python", args: ["~/.myagent/hooks/block-dangerous.py"] }] }],
   },
 };
-// 注意 provider 段的键必须是 CCR 的 providerId（claude-code-router），
-// 不是上游名（alpha）——isManagedContent 查的正是这个键。
+// The provider section key must be CCR's own providerId (claude-code-router),
+// NOT the upstream name (alpha) — that key is exactly what isManagedContent checks.
 const cfg = (extra = {}) => JSON.stringify({ provider: { [ID]: {} }, hooks: FULL_HOOKS, ...extra });
 
 describe("isManagedContent", () => {
@@ -65,7 +69,7 @@ describe("isManagedContent", () => {
   });
 
   it("should reject a config that only mentions an unrelated provider", () => {
-    // 实测：4472B 那批快照只有 alpha，CCR 因此从不选它们
+    // Measured: that batch of snapshots named only the upstream, so CCR never selects them
     const t = JSON.stringify({ provider: { alpha: {} }, model: "alpha/model-b" });
     expect(isManagedContent(t, ID)).toBe(false);
   });
@@ -76,7 +80,7 @@ describe("isManagedContent", () => {
 });
 
 describe("isManagedOpencode", () => {
-  // opencode 的判据与 zcode 不同：查 provider[ccr].options.headers["x-ccr-client"]
+  // opencode's check differs from zcode's: it looks at provider[ccr].options.headers["x-ccr-client"]
   const oc = (extra = {}) =>
     JSON.stringify({
       provider: { [ID]: { options: { headers: { "x-ccr-client": "opencode" } } } },
@@ -132,7 +136,7 @@ describe("opencodeHealth", () => {
   it("should reject a bare direct-connect model that bypasses CCR", () => {
     const t = JSON.stringify({ model: "acme/some-model" });
     expect(opencodeHealth(t).ok).toBe(false);
-    expect(opencodeHealth(t).reason).toMatch(/未经 CCR|not via CCR/);
+    expect(opencodeHealth(t).reason).toMatch(/not routed via CCR/);
   });
 
   it("should reject when small_model disagrees with model", () => {
@@ -182,7 +186,7 @@ describe("hooksHealth", () => {
 
 describe("pickRestoreCandidate", () => {
   it("should take the newest by name, since CCR reverses the sorted list", () => {
-    // X$e 升序 → reverse → 第一个即名字最大的
+    // Ascending list, then reversed — so the first is the lexicographically largest
     const items = [
       { name: "config.json.ccr-backup-2026-09-15T00-00-00-000Z", managed: true, ok: true },
       { name: "config.json.ccr-backup-2026-09-21T00-00-00-000Z", managed: true, ok: true },
@@ -191,7 +195,7 @@ describe("pickRestoreCandidate", () => {
   });
 
   it("should skip a newer candidate that fails the managed check", () => {
-    // 实测：4472B 快照名字更大但 managed=否，会被跳过
+    // Measured: a snapshot with a larger name but managed=false gets skipped
     const items = [
       { name: "config.json.ccr-backup-2026-09-21T00-00-00-000Z", managed: false, ok: true },
       { name: "config.json.ccr-backup-2026-09-20T00-00-00-000Z", managed: true, ok: true },
@@ -214,7 +218,7 @@ describe("pickRestoreCandidate", () => {
 
 describe("auditCandidates", () => {
   it("should flag only candidates that are both managed and broken", () => {
-    // 核心判据：managed=否 的坏文件是惰性的，不该计入威胁
+    // The core rule: a broken file that is not managed is inert and must not count as a threat
     const threats = auditCandidates([
       { name: "a", managed: true, hooksOk: false },
       { name: "b", managed: false, hooksOk: false },

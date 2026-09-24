@@ -1,24 +1,32 @@
 #!/usr/bin/env node
 /**
- * ccr-check — CCR 网关健康体检（只读，不改任何配置）
+ * ccr-check — CCR gateway health check (read-only; changes nothing)
  *
- * 用法：
- *   node scripts/maintain/ccr-check.mjs [--json] [--hit-threshold 50]
+ * Usage:
+ *   node src/ccr-check.mjs [--json] [--hit-threshold 50]
  *
- * 为什么存在：2026-09-13 对 CCR 3.1.0 做了一次全量取证，所有结论都是手工查
- * config.sqlite / usage.sqlite / request-logs.sqlite 得出的，做完就散了。
- * 这个脚本把那些检查固化成可重复的一条命令，防止同样的问题重新长回来。
+ * Why it exists: a full forensic pass over CCR 3.1.0 was done by hand —
+ * every conclusion reached by querying config.sqlite / usage.sqlite /
+ * request-logs.sqlite manually, and then scattered to the wind. This script
+ * freezes those checks into one repeatable command so the same problems cannot
+ * quietly grow back.
  *
- * 检查项（每项都有对应单测，fixture 取自本机真实数据）：
- *   1. Router.fallback —— mode=off 时 429 会直接抛给客户端（实测就是这么发生的）
- *   2. Claude Code profile —— 五个槽位是否齐全、是否有自公告过期的模型
- *   3. 数据库膨胀 —— SQLite 删行不还盘，request-logs 实测 598MB 里 97.7% 是空页
- *   4. 请求体取证可用率 —— CCR 把超 160KB 的 body 折成"预览"（中间插省略标记），
- *      导致 JSON 断裂且 request_body_truncated 不置位
- *   5. status=0 记录缺口 —— 计入失败会把 ~90% 成功率误算成 66.7%
+ * Checks (each has unit tests; fixtures taken from real local data):
+ *   1. Router.fallback — with mode=off, a 429 is thrown straight at the client
+ *      (measured: exactly how it happened)
+ *   2. Claude Code profile — are all five slots set, and does any slot point at
+ *      a model that self-declares an expiry
+ *   3. Database bloat — SQLite does not return disk space on row deletion;
+ *      request-logs measured 598MB of which 97.7% was free pages
+ *   4. Request-body forensic usability — CCR folds bodies over 160KB into a
+ *      "preview" (an elision marker spliced into the middle), which breaks the
+ *      JSON while request_body_truncated stays unset
+ *   5. status=0 logging gap — counting these as failures turns a ~90% success
+ *      rate into 66.7%
  *
- * 全部只读打开（mode=ro），不会干扰正在运行的 CCR。
- * 退出码：1 = 有 fail 项；0 = 仅 warn 或全 ok（warn 不打断自动化）。
+ * Everything opens read-only (mode=ro) and never disturbs a running CCR.
+ * Exit code: 1 = at least one `fail`; 0 = warnings only or all ok
+ * (a warning does not break automation).
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -32,7 +40,8 @@ process.on('warning', (w) => {
   if (!(w.name === 'ExperimentalWarning' && /SQLite/i.test(w.message))) console.warn(w);
 });
 
-// CCR 把超限 body 折成预览时插入的标记（见 app.asar 内 Cse/fae 两个函数，上限 qf=160*1024）
+// The marker CCR splices in when it folds an oversized body into a preview
+// (see the two helpers in app.asar; the cutoff is 160*1024 bytes).
 export const PREVIEW_MARKER = /\.\.\. (\d+) bytes omitted from preview \.\.\./;
 
 export function hasPreviewMarker(text) {
@@ -139,10 +148,12 @@ export function checkLoggingGap(statusRows) {
 }
 
 /**
- * 按时间窗口把时间戳聚成事件。同一次并行爆发里的多条 429 会被并成一个事件。
- * 簇内平均间隔还能区分成因：
- *   秒级 / 亚秒级间隔 → parallel（客户端并行打爆 RPM）
- *   均匀的数秒以上间隔 → sequential（顺序退避重试）
+ * Cluster timestamps into events using a time window, so several 429s from one
+ * parallel burst collapse into a single event.
+ *
+ * The average gap inside a cluster distinguishes the cause:
+ *   sub-second / one-second gaps -> parallel (client fan-out blew the RPM limit)
+ *   even gaps of several seconds -> sequential (retry with backoff)
  */
 export function clusterTimestamps(timestamps, windowSeconds) {
   const ts = timestamps.map((t) => Date.parse(t)).filter((n) => !Number.isNaN(n)).sort((a, b) => a - b);
@@ -164,8 +175,10 @@ export function clusterTimestamps(timestamps, windowSeconds) {
 }
 
 /**
- * 限流体检。**报事件数而不是原始条数** —— 实测 494 条 429 只聚成 53 个事件，
- * 直接报条数会把问题夸大近 10 倍。并行爆发占比高时指向客户端 fan-out 超过上游 RPM。
+ * Rate-limit check. Report the EVENT COUNT, not the raw row count: measured
+ * 494 rate-limit rows collapsed into just 53 events, so reporting rows inflates
+ * the problem roughly tenfold. A high share of parallel bursts points at client
+ * fan-out exceeding the upstream RPM limit rather than a config problem.
  */
 export function checkRateLimitBursts(timestamps, windowSeconds = 10) {
   const { total, events } = clusterTimestamps(timestamps, windowSeconds);
@@ -223,7 +236,7 @@ function collect() {
   const checks = [];
   const facts = {};
 
-  // 1+2. 配置
+  // 1+2. config
   const cfgPath = locate('config.sqlite');
   if (!cfgPath) {
     checks.push({ id: 'config', level: 'fail', detail: 'config.sqlite not found — is CCR installed?' });
@@ -242,16 +255,16 @@ function collect() {
     }
   }
 
-  // 3. 膨胀
+  // 3. bloat
   for (const name of ['request-logs.sqlite', 'usage.sqlite', 'context-archive.sqlite']) {
     const p = locate(name);
     if (!p) continue;
     try {
       checks.push(checkBloat({ label: name.replace('.sqlite', ''), fileBytes: fs.statSync(p).size, liveBytes: liveBytes(p) }));
-    } catch { /* 读不到只是少一项检查 */ }
+    } catch { /* unreadable just means one fewer check, not an error */ }
   }
 
-  // 4. 请求体取证可用率
+  // 4. request-body forensic usability
   const logsPath = locate('request-logs.sqlite');
   if (logsPath) {
     const db = openRo(logsPath);
@@ -264,7 +277,7 @@ function collect() {
     }
   }
 
-  // 5. 状态缺口 + 在用路径命中率
+  // 5. logging gap + live-path hit rate
   const usagePath = locate('usage.sqlite');
   if (usagePath) {
     const db = openRo(usagePath);
@@ -277,7 +290,7 @@ function collect() {
       facts.successRate = health.successRate;
       facts.topFailure = health.topFailure;
 
-      // 限流按事件数报，不按原始条数（见 checkRateLimitBursts 注释）
+      // Report rate limits by event count, not raw rows (see checkRateLimitBursts)
       const rlTs = db.prepare(
         'SELECT created_at FROM usage_events WHERE status_code = 429 AND created_at >= ? ORDER BY created_at'
       ).all(new Date(Date.now() - 7 * 86400000).toISOString()).map((r) => r.created_at);
@@ -296,7 +309,7 @@ function collect() {
           FROM usage_events WHERE created_at >= ? AND cache_read_tokens > 0 AND input_tokens > 0
          ORDER BY created_at DESC LIMIT 4000`).all(new Date(Date.now() - 7 * 86400000).toISOString());
 
-      // 逐条判口径（与 cache-monitor 同一套规则，避免两处口径漂移）
+      // Decide the convention per row, using the same rules as cache-monitor so the two cannot drift
       const byKey = new Map();
       for (const s of samples) {
         const k = `${s.provider}|${s.model}`;

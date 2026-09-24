@@ -1,27 +1,31 @@
 #!/usr/bin/env node
 /**
- * cache-monitor — 缓存命中率监控（数据源：CCR usage.sqlite）
+ * cache-monitor — prompt cache hit rate (data source: CCR's usage.sqlite)
  *
- * 用法：
- *   node scripts/maintain/cache-monitor.mjs [--window 24h] [--threshold 50] [--live-hours 24] [--json]
+ * Usage:
+ *   node src/cache-monitor.mjs [--window 24h] [--threshold 50] [--live-hours 24] [--json]
  *
- * 判定：命中率 = cache_read / (input + cache_read)
- *   input 是「未命中缓存」的输入 token，cache_read 是命中部分，
- *   两者相加 = 本次请求的完整前缀长度，故比值即真实前缀命中率。
+ * Definition: hit rate = cache_read / (input + cache_read)
+ *   `input` counts input tokens that MISSED the cache; `cache_read` counts the
+ *   part that hit. Their sum is the full prefix length of the request, so the
+ *   ratio is the true prefix hit rate.
  *
- * 退出码：0 = 全部达标或样本不足；1 = 有**在用**路径低于阈值（可做门禁）。
+ * Exit code: 0 = everything meets the threshold, or too few samples to judge;
+ *            1 = a LIVE path is below the threshold (usable as a CI gate).
  *
- * 历史：旧数据源 new-api/one-api.db 于 2026-09-03 随 new-api 退役而删除，
- * 本脚本一度退化成恒退出的空壳。2026-09-10 改接 CCR 的 usage.sqlite
- * （claude-code-router 运行期持续写入，含 cache_read_tokens 分列）。
+ * TWO DESIGN DECISIONS, both forced by measured data (see the tests):
  *
- * 两处设计修正，均由实测数据触发（见 tests/cache-monitor.test.mjs）：
- *   1. 分组键用 provider|model 而非 model。依据：同一 model 在不同 provider 下
- *      口径可能不同（实测同一 CCR 里两种口径并存），且命中率差异的主因是
- *      provider 附带的**协议**——同一模型走 anthropic 路径 0%、走
- *      openai_chat_completions 路径 57.9%。只按 model 分组会把这两者糊成一行。
- *   2. 引入 live 判定（默认 24h 内出现过）：退役路径仍留在 --window 内，
- *      旧版会把已废弃的 0% 路径当作在用故障报出来。现在退役行单独列出、不进门禁。
+ *   1. Group by provider|model, not by model. The reporting convention can
+ *      differ per provider even for the same model (measured: two conventions
+ *      coexist inside one CCR), and the main driver of a hit-rate difference is
+ *      the PROTOCOL the provider is routed over — the same model scored 0% on
+ *      the anthropic path and 57.9% on openai_chat_completions. Grouping by
+ *      model alone smears those two into a single misleading row.
+ *
+ *   2. Add a "live" notion (seen within 24h by default). Retired paths still
+ *      fall inside --window, and the earlier version reported a decommissioned
+ *      0% path as if it were an active failure. Retired rows are now listed
+ *      separately and excluded from the gate.
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -29,10 +33,11 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 
-export const MIN_SAMPLE = 5; // 样本太少不算命中率（首会话冷启动必然 miss，不代表异常）
-const RATIO_SPLIT = 0.25; // 采样中位数低于此值判为 remainder 口径（实测两口径分别 ~0.001 / ~1.0）
+export const MIN_SAMPLE = 5; // below this, don't compute a rate (a cold first session always misses — that is not an anomaly)
+const RATIO_SPLIT = 0.25; // median below this => "remainder" convention (measured: the two conventions sit at ~0.001 and ~1.0)
 
-// sqlite 是实验特性，会往 stderr 打 ExperimentalWarning；只吞这一条，其余照常
+// node:sqlite is experimental and prints an ExperimentalWarning to stderr.
+// Swallow that one; let everything else through.
 process.removeAllListeners('warning');
 process.on('warning', (w) => {
   if (!(w.name === 'ExperimentalWarning' && /SQLite/i.test(w.message))) console.warn(w);
@@ -40,7 +45,7 @@ process.on('warning', (w) => {
 
 export function windowToMs(spec) {
   const m = /^(\d+)([mhd])$/.exec(String(spec).trim());
-  if (!m) throw new Error(`窗口格式非法: ${spec}（示例 60m / 24h / 7d）`);
+  if (!m) throw new Error(`Invalid window format: ${spec} (expected e.g. 60m / 24h / 7d)`);
   const n = Number(m[1]);
   return n * { m: 60000, h: 3600000, d: 86400000 }[m[2]];
 }
@@ -48,15 +53,22 @@ export function windowToMs(spec) {
 export const groupKey = (provider, model) => `${provider}|${model}`;
 
 /**
- * 判定上游对 usage.input_tokens 的上报口径 —— 按 provider|model 逐条判，不全局假设：
- *   remainder：input = 未命中余量，总前缀 = input + cache_read
- *   total    ：input = 完整前缀（含已命中部分），缓存部分被重复计数
- * 判据：命中行的 input/cache_read 比值中位数。remainder 口径下极小（实测 ~0.001），
- * total 口径下接近或大于 1（实测 ~1.09）。
- * 口径判错会把 99.9% 的命中率算成 50%，故必须逐条判定而非全局假设。
+ * Work out how an upstream reports `usage.input_tokens` — decided PER
+ * provider|model, never assumed globally:
+ *   remainder: input = the tokens that MISSED; full prefix = input + cache_read
+ *   total:     input = the FULL prefix (already includes the hits), so the
+ *              cached portion gets counted twice
  *
- * 实测：同一 CCR 里两种口径同时存在（取决于 provider 及其所选协议），
- * 所以按 provider|model 分组判定是必须的，不能全局假设一种。
+ * Test: the median of input/cache_read across cache-hit rows. Under
+ * `remainder` it is tiny (measured ~0.001); under `total` it approaches or
+ * exceeds 1 (measured ~1.09).
+ *
+ * Getting this wrong turns a 99.9% hit rate into 50%, so it must be decided
+ * row by row rather than assumed once.
+ *
+ * Measured: both conventions coexist inside a single CCR (it depends on the
+ * provider and the protocol it is routed over), which is exactly why the
+ * decision is per provider|model.
  */
 export function inferConvention(samples) {
   const byKey = new Map();
@@ -74,10 +86,13 @@ export function inferConvention(samples) {
 }
 
 /**
- * 口径有效性守卫：total 口径要求 cache_read ≤ input（input 已含命中部分）。
- * 实测 某模型 走 openai_chat_completions 时 c > i（137%）——
- * total 口径此时不可能成立，必须回落 remainder，否则会被静默截断成 100%，
- * 把真实缺口盖掉（旧版正是用 Math.min(...,100) 掩盖的）。
+ * Convention validity guard: `total` requires cache_read <= input, because
+ * input is supposed to already contain the cached part. Measured: one model on
+ * the openai_chat_completions path reported c > i (137%) — under those numbers
+ * `total` cannot hold, so fall back to `remainder`.
+ *
+ * Without this, the rate would be silently clamped to 100% and the real gap
+ * hidden — which is exactly what the earlier version did with Math.min(...,100).
  */
 export function resolveConvention(inferred, uncached, cached) {
   const convention = inferred || 'remainder';
@@ -114,12 +129,18 @@ export function shapeRow(raw, convMap, liveHours, nowMs) {
 }
 
 /**
- * 把 usage_events.model 的多种写法归一到逻辑模型名。
- * 实测同一模型出现过 5 种写法（带 provider 前缀、带构建日期、带过期说明等），
- * 成本被拆散在多个分组里，按原样汇总必然低估。
- * 通用规则按顺序去掉：provider 前缀 → 过期说明 → 尾部构建日期 → [1m] 标记；
- * 通用规则处理不了的走 model-aliases.json（左边的键是归一化后的名字）。
- * 注意：尾部 4 位数字一刀切有误伤风险（如 gpt-4-1106），故显式别名优先于通用规则。
+ * Collapse the many spellings of usage_events.model into one logical name.
+ *
+ * Measured: the same model appeared under 5 different spellings (with a
+ * provider prefix, with a build date, with an expiry note, …), which splits its
+ * cost across several groups — summing as-is under-reports.
+ *
+ * The generic rules strip, in order: provider prefix -> expiry note -> trailing
+ * build date -> [1m] marker. Anything the generic rules cannot infer goes in
+ * model-aliases.json (the left-hand key is the already-normalized name).
+ *
+ * Careful: blindly stripping a trailing 4-digit number can misfire (e.g.
+ * gpt-4-1106), so an explicit alias always wins over the generic rules.
  */
 export function normalizeModel(raw, aliases = new Map()) {
   if (typeof raw !== 'string') return '';
@@ -148,10 +169,13 @@ function labelFor(status) {
 }
 
 /**
- * 状态分布汇总。关键约定：`status_code=0` 是**记录缺口**而非失败 ——
- * 实测 420 条 status=0 全部带正常 output_tokens（仅 09-10/09-11 两天），
- * 是请求成功但 CCR 没记上状态。若计入失败，成功率会从 ~90% 误算成 66.7%。
- * 故失败与成功率的分母都剔除 status=0，并把缺口单独报出。
+ * Status distribution. Key convention: `status_code=0` is a LOGGING GAP, not a
+ * failure. Measured: 420 rows with status=0 all carried normal output_tokens
+ * (over two days only) — the request succeeded, CCR just did not record the
+ * status. Counting them as failures understates a ~90% success rate as 66.7%.
+ *
+ * So both the failure count and the success-rate denominator exclude status=0,
+ * and the gap is reported on its own.
  */
 export function summarizeStatus(rows) {
   const byStatus = rows
@@ -169,9 +193,10 @@ export function summarizeStatus(rows) {
     ok,
     failed,
     successRate: attempts > 0 ? (ok / attempts) * 100 : 100,
-    // 明确标注是**原始日志条数**：并发爆发会让同一批重试各占一条，
-    // 实测 494 条 429 只聚成 53 个事件，不标注会让人以为真有几百次失败。
-    // 按事件数的口径见 `npm run ccr:check` 的 rateLimit 项。
+    // Label this explicitly as RAW LOG ROWS. A concurrency burst gives every
+    // retry in the batch its own row — measured: 494 rate-limit rows collapsed
+    // into only 53 events. Unlabelled, it reads as hundreds of real failures.
+    // For the per-event count, see the rateLimit check in ccr-check.
     topFailure: top
       ? `${top.status_code} (${labelFor(top.status_code)}) x${top.n} log rows (concurrency bursts included; see ccr-check for event counts)`
       : null,
@@ -179,11 +204,14 @@ export function summarizeStatus(rows) {
 }
 
 /**
- * 该 provider/模型是否免费。CCR 的 cost_usd 是按定价表估算的（cost_source =
- * models.dev / litellm），**免费 provider 也会被估出正数**，故必须显式声明，
- * 否则报表把免费额度当成真实支出（曾据此把免费模型误判为成本最高）。
- * provider 用前缀匹配 —— 运行期名可能带后缀，形如
- * `myprovider::openai_chat_completions::cred:key-1-1`。
+ * Is this provider/model free? CCR's cost_usd is ESTIMATED from a pricing table
+ * (cost_source = models.dev / litellm), and a free provider still gets a
+ * positive estimate — so free paths must be declared explicitly, or the report
+ * treats free quota as real spend (this once made a free model look like the
+ * most expensive one in the fleet).
+ *
+ * Providers match by PREFIX, because runtime names may carry a suffix, e.g.
+ * `myprovider::openai_chat_completions::cred:key-1-1`.
  */
 export function isFree(provider, logical, cfg) {
   if (!cfg) return false;
@@ -192,7 +220,8 @@ export function isFree(provider, logical, cfg) {
   return (cfg.freeModels || []).includes(logical);
 }
 
-/** 按逻辑模型合并各写法/各 provider 的 token 与成本；命中率用合并后的总量重算，不做比率平均。 */
+/** Merge tokens and cost across spellings/providers for one logical model.
+ *  The hit rate is recomputed from the merged totals — never by averaging ratios. */
 export function aggregateByLogicalModel(rows, aliases = new Map(), freeCfg = null) {
   const map = new Map();
   for (const r of rows) {
@@ -206,7 +235,7 @@ export function aggregateByLogicalModel(rows, aliases = new Map(), freeCfg = nul
     a.uncached += r.uncached || 0;
     a.cached += r.cached || 0;
     a.estimatedCost += est;
-    // 免费路径的估算值单独留档（estimatedCost），不进计费口径
+    // Keep free-path estimates in their own field (estimatedCost) — they are not billable
     if (!isFree(r.provider, logical, freeCfg)) a.cost += est;
     else a.free = true;
     if (r.model) a.spellings.add(r.model);
@@ -220,7 +249,7 @@ export function aggregateByLogicalModel(rows, aliases = new Map(), freeCfg = nul
     .sort((x, y) => y.requests - x.requests);
 }
 
-/** 配置缺失或损坏不该让监控挂掉 —— 退化为只用通用规则 */
+/** A missing or corrupt config must not take the monitor down — degrade to generic rules only */
 function loadConfig() {
   try {
     const raw = JSON.parse(fs.readFileSync(new URL('./model-aliases.json', import.meta.url), 'utf8'));
@@ -256,7 +285,7 @@ function locateDb() {
 }
 
 function collect(dbPath, sinceIso) {
-  // readOnly 保证不会干扰正在运行的 CCR（不写、不 checkpoint）
+  // readOnly so this never disturbs a running CCR (no writes, no checkpoint)
   const db = new DatabaseSync(dbPath, { readOnly: true });
   try {
     const series = db
@@ -276,7 +305,7 @@ function collect(dbPath, sinceIso) {
           ORDER BY (SUM(COALESCE(input_tokens,0)) + SUM(COALESCE(cache_read_tokens,0))) DESC`
       )
       .all(sinceIso);
-    // 取命中行样本，用于逐条判定上报口径（见 inferConvention）
+    // Sample the cache-hit rows so the convention can be decided per row (see inferConvention)
     const samples = db
       .prepare(
         `SELECT COALESCE(NULLIF(provider, ''), 'unknown') AS provider,
@@ -340,13 +369,13 @@ function printTable(title, rows) {
 
 export function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
-  // created_at 为 ISO8601 UTC（带 Z），用 toISOString 保证字符串可比
+  // created_at is ISO8601 UTC (with Z); toISOString keeps string comparison valid
   const sinceIso = new Date(Date.now() - windowToMs(args.window)).toISOString();
   const nowMs = Date.now();
 
   const dbPath = locateDb();
   if (!dbPath) {
-    console.error('❌ 未找到 CCR usage.sqlite（CCR 未安装或未运行过）');
+    console.error('ERROR: CCR usage.sqlite not found (CCR not installed, or never run)');
     process.exit(0);
   }
 
@@ -361,13 +390,13 @@ export function main(argv = process.argv.slice(2)) {
     logical = aggregateByLogicalModel(series.filter((r) => r.requests >= MIN_SAMPLE), aliases, free);
     health = summarizeStatus(statusRows);
   } catch (e) {
-    console.error(`❌ 读取 usage.sqlite 失败: ${e.message}`);
-    process.exit(0); // 监控本身不该因读不到数据而红灯
+    console.error(`ERROR: failed to read usage.sqlite: ${e.message}`);
+    process.exit(0); // the monitor itself must not go red just because it cannot read data
   }
 
   const live = rows.filter((r) => r.live);
   const retired = rows.filter((r) => !r.live);
-  // 门禁只看在用路径：退役路径的 0% 是历史，不是当前故障
+  // The gate only looks at live paths: a retired path at 0% is history, not a current fault
   const below = live.filter((r) => !r.unsupported && r.hitRate !== null && r.hitRate < args.threshold);
 
   if (args.json) {
@@ -395,7 +424,7 @@ export function main(argv = process.argv.slice(2)) {
     console.log(`\nOverall hit rate across live, cache-capable paths: ${((totCached / totAll) * 100).toFixed(1)}%`);
   }
 
-  // 按逻辑模型汇总：合并同一模型的不同写法与 provider，成本口径才完整
+  // Group by logical model: merging spellings and providers is what makes the cost picture complete
   console.log('\nBY LOGICAL MODEL (merges provider prefixes, build dates, aliases)');
   const lw = Math.max(6, ...logical.map((a) => a.logical.length));
   console.log(`  ${'model'.padEnd(lw)}  ${'reqs'.padStart(7)}  ${'hit rate'.padStart(8)}  ${'cost USD'.padStart(9)}  notes`);
@@ -412,7 +441,7 @@ export function main(argv = process.argv.slice(2)) {
   console.log(`\n  Billable total: $${billable.toFixed(2)} (estimated by CCR from a pricing table — NOT a bill)`);
   if (freeEstimate > 0) console.log(`  Free-path price-table estimate: $${freeEstimate.toFixed(2)} (not actually billed; excluded from the total above)`);
 
-  // 状态健康度：status=0 是记录缺口不是失败，必须单独说明，否则成功率会被误算
+  // Status health: status=0 is a logging gap, not a failure — it must be called out or the success rate is wrong
   console.log('\nSTATUS & HEALTH');
   for (const r of health.byStatus) {
     console.log(`  ${String(r.status).padStart(4)}  ${r.label.padEnd(22)} ${String(r.n).padStart(6)}`);
@@ -434,5 +463,5 @@ export function main(argv = process.argv.slice(2)) {
   process.exit(0);
 }
 
-// 仅直接执行时跑 main()，被 import（测试）时只导出纯函数
+// Run main() only when executed directly; when imported (by tests) export the pure functions only
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();

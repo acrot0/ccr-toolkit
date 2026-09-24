@@ -1,10 +1,11 @@
 /**
- * cache-monitor 的口径判定与分组逻辑单测。
+ * Unit tests for cache-monitor's convention detection and grouping logic.
  *
- * 这些用例全部来自 CCR usage.sqlite 的真实数据形态（2026-09-13 采样）：
- *   - 同一 model 在不同 provider 下口径不同（model-z2 两种 provider 分别是 remainder/total）
- *   - 已退役的 provider 路径仍留在窗口内，不该触发告警
- * 详见文件内各 it 的场景说明。
+ * Every case is shaped by real data from CCR's usage.sqlite:
+ *   - the same model reports under different conventions per provider
+ *     (model-z2 came back as remainder on one and total on another)
+ *   - a retired provider path still sits inside the window and must not alarm
+ * See the individual `it` blocks for the scenario behind each one.
  */
 import { describe, it, expect } from "vitest";
 import {
@@ -12,24 +13,24 @@ import {
   normalizeModel, summarizeStatus, aggregateByLogicalModel, isFree,
 } from "../src/cache-monitor.mjs";
 
-// 构造采样行：契约为 {key, i, c}
+// Build a sample row; the shape is {key, i, c}
 const s = (key, i, c) => ({ key, i, c });
 
 describe("inferConvention", () => {
   it("should classify as remainder when per-request input/cache ratio is tiny", () => {
-    // alpha/model-b 实测 input≈未命中余量，比值 ~0.001
+    // alpha/model-b measured: input ~= the uncached remainder, ratio ~0.001
     const conv = inferConvention([s("alpha|model-b", 92, 5120), s("alpha|model-b", 120, 6000)]);
     expect(conv.get("alpha|model-b")).toBe("remainder");
   });
 
   it("should classify as total when per-request input/cache ratio is near or above 1", () => {
-    // beta/model-z2 实测 input 为完整前缀（含命中部分），比值 ~1.09
+    // beta/model-z2 measured: input is the FULL prefix (hits included), ratio ~1.09
     const conv = inferConvention([s("beta|model-z2", 9000, 8000), s("beta|model-z2", 11000, 10000)]);
     expect(conv.get("beta|model-z2")).toBe("total");
   });
 
   it("should infer per provider, not per model, when the same model reports two conventions", () => {
-    // 实测：model=model-z2 在 cred 路径是 remainder，在 beta 预设是 total
+    // Measured: model-z2 is remainder on the cred path and total on the beta preset
     const conv = inferConvention([
       s("beta|model-z2", 9000, 8000),
       s("beta::openai_chat_completions::cred:key-1-1|model-z2", 1000, 9000),
@@ -45,7 +46,7 @@ describe("resolveConvention", () => {
   });
 
   it("should fall back to remainder when total would yield more than 100 percent", () => {
-    // 实测 model-g2 via chat_completions: c > i，total 口径会算出 137%
+    // Measured for model-g2 via chat_completions: c > i, so `total` would compute 137%
     expect(resolveConvention("total", 3067992, 4217856)).toEqual({ convention: "remainder", corrected: true });
   });
 
@@ -82,7 +83,7 @@ describe("shapeRow", () => {
   });
 
   it("should mark a retired path as not live so it cannot trip the gate", () => {
-    // 实测：gamma 走 anthropic 的 0% 路径最后出现在 2026-09-09，09-10 已切到 chat_completions
+    // Measured: gamma's 0% anthropic path last appeared 2026-09-09; by 09-10 it had moved to chat_completions
     const row = shapeRow(
       { key: "gamma|model-g/model-g2", requests: 82, uncached: 1587701, cached: 0, lastSeen: "2026-09-09T20:25:49.315Z" },
       new Map(), liveHours, now
@@ -124,9 +125,10 @@ describe("windowToMs", () => {
 });
 
 /**
- * 归一化的动因：CCR 的 usage_events 把同一个 DeepSeek 模型记成 5 种写法，
- * 累计成本被拆散（$38.12 / $1.51 / $0.01 / $0），按模型汇总必然低估。
- * 下面 5 个字符串是从真实库里抄下来的。
+ * Why normalize: CCR's usage_events recorded one model under 5 spellings,
+ * splitting its cumulative cost across $38.12 / $1.51 / $0.01 / $0 — summing by
+ * raw string necessarily under-reports. The 5 strings below are copied from the
+ * live database.
  */
 describe("normalizeModel", () => {
   const aliases = new Map([["model-b-flash", "model-b"]]);
@@ -167,7 +169,7 @@ describe("normalizeModel", () => {
   });
 
   it("should prefer an explicit alias over the generic rules", () => {
-    expect(normalizeModel("model-b-flash", new Map([["model-b-flash", "自定义名"]]))).toBe("自定义名");
+    expect(normalizeModel("model-b-flash", new Map([["model-b-flash", "custom-name"]]))).toBe("custom-name");
   });
 
   it("should fall back to the trimmed raw name when given junk", () => {
@@ -177,9 +179,10 @@ describe("normalizeModel", () => {
 });
 
 /**
- * 动因：usage_events 里 status_code=0 有 420 条（仅 09-10/09-11 两天），
- * 全部带正常 output_tokens —— 是「成功但没记上状态」的记录缺口。
- * 若当失败统计会把成功率从 ~90% 误算成 66.7%。
+ * Why: usage_events held 420 rows with status_code=0 (over two days only), all
+ * carrying normal output_tokens — a logging gap where the request succeeded but
+ * the status was never recorded. Counting them as failures understates a ~90%
+ * success rate as 66.7%.
  */
 describe("summarizeStatus", () => {
   const rows = [
@@ -192,12 +195,12 @@ describe("summarizeStatus", () => {
   it("should exclude the logging gap from the failure count", () => {
     const s = summarizeStatus(rows);
     expect(s.loggingGap).toBe(420);
-    expect(s.failed).toBe(177); // 429 + 502，不含 status=0
+    expect(s.failed).toBe(177); // 429 + 502, excluding status=0
   });
 
   it("should compute success rate against real attempts, not the raw total", () => {
     const s = summarizeStatus(rows);
-    // 1210 / (1210 + 171 + 6)，status=0 不计入分母
+    // 1210 / (1210 + 171 + 6); status=0 is excluded from the denominator
     expect(s.successRate).toBeCloseTo(87.2, 1);
   });
 
@@ -214,7 +217,7 @@ describe("summarizeStatus", () => {
   });
 
   it("should label the failure count as raw log entries, since bursts inflate it", () => {
-    // 实测 494 条 429 只聚成 53 个事件 —— 不标注会让人以为真有 494 次失败
+    // Measured: 494 rate-limit rows collapse into 53 events — unlabelled, it reads as 494 real failures
     const s = summarizeStatus(rows);
     expect(s.topFailure).toMatch(/log rows/);
     expect(s.topFailure).toMatch(/ccr-check/);
@@ -229,10 +232,12 @@ describe("summarizeStatus", () => {
 });
 
 /**
- * 动因：CCR 的 cost_usd 是**按定价表估算**（cost_source = 'models.dev' / 'litellm'），
- * 不是实际账单。实测 gamma 全程 $0（cost_source 空），而 beta/model-z2 被
- * litellm 定价表算出 $10.45 —— 但用户确认这两个 provider 是免费的。
- * 若不标注，报表会把「免费额度」当成真花掉的钱（曾据此误判 model-z2 是成本最高的模型）。
+ * Why: CCR's cost_usd is ESTIMATED from a pricing table (cost_source =
+ * 'models.dev' / 'litellm'), not read from a bill. Measured: gamma showed $0
+ * throughout (empty cost_source) while beta/model-z2 was costed at $10.45 by the
+ * litellm table — yet both providers are in fact free. Without declaring that,
+ * the report treats free quota as money actually spent (this once made model-z2
+ * look like the most expensive model in the fleet).
  */
 describe("isFree", () => {
   const cfg = { freeProviders: ["gamma", "beta"], freeModels: ["model-z2"] };
@@ -243,7 +248,7 @@ describe("isFree", () => {
   });
 
   it("should match the provider prefix including credential suffixes", () => {
-    // 实测 provider 形如 gamma::openai_chat_completions::cred:key-1-1
+    // Measured runtime provider name looks like gamma::openai_chat_completions::cred:key-1-1
     expect(isFree("gamma::openai_chat_completions::cred:key-1-1", "model-g2", cfg)).toBe(true);
     expect(isFree("beta::openai_chat_completions::cred:key-1-1", "model-z2", cfg)).toBe(true);
   });
@@ -290,7 +295,7 @@ describe("aggregateByLogicalModel", () => {
   });
 
   it("should recompute the hit rate on the merged totals, not average the rates", () => {
-    // 1 条 100% 命中 + 1 条 0% 命中，合并后应是 50% 而非 (100+0)/2
+    // One row at 100% and one at 0%; merged this must be 50%, not (100+0)/2
     const rows = [
       { model: "a-0731", provider: "p1", requests: 1, uncached: 0, cached: 100, cost: 0 },
       { model: "a", provider: "p2", requests: 1, uncached: 100, cached: 0, cost: 0 },
@@ -312,7 +317,7 @@ describe("aggregateByLogicalModel", () => {
     const paid = out.find((a) => a.logical === "model-b");
     expect(free.free).toBe(true);
     expect(free.estimatedCost).toBeCloseTo(10.45, 2);
-    expect(free.cost).toBe(0); // 免费的不进计费口径
+    expect(free.cost).toBe(0); // free paths stay out of the billable total
     expect(paid.free).toBe(false);
     expect(paid.cost).toBeCloseTo(38.0, 2);
   });
