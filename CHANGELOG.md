@@ -6,6 +6,23 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- Release workflow: pushing a `v*` tag runs the full test suite, verifies the
+  packed tarball against the `files` field, and publishes to npm with
+  provenance. `workflow_dispatch` with `dry_run: true` rehearses everything
+  short of publishing.
+
+### Changed
+
+- The main entry point's bin is now **`ccr-toolkit`**, not `ccr` — the upstream
+  CCR CLI already owns `ccr`, so a global install of both packages would
+  collide (npm refuses with EEXIST, leaving whichever installed second broken).
+- npm metadata (`repository`/`bugs`/`homepage`) — `npm publish --provenance`
+  requires a `repository` field, and the npm page should link back here.
+- README: npm install path documented; fixed the `<you>` placeholder left in
+  the clone URL.
+
 ## [0.2.0] — 2026-09-24
 
 Six tools. The three added in this release all answer questions the first three

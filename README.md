@@ -1,7 +1,7 @@
 # ccr-toolkit
 
 [![CI](https://github.com/acrot0/ccr-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/acrot0/ccr-toolkit/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-185%20passing-brightgreen)](test/)
+[![tests](https://img.shields.io/badge/tests-195%20passing-brightgreen)](test/)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522.13-blue)](https://nodejs.org)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
@@ -20,7 +20,7 @@ node src/cli.mjs          # run the whole sweep, get one verdict
   ✅ takeover   OK
 
   3 ok, 1 warn, 0 fail
-  Needs attention:  ccr check
+  Needs attention:  ccr-toolkit check
   Overall: ⚠️  WARN
 ```
 
@@ -144,9 +144,17 @@ Requires **Node.js ≥ 22.13** (uses the built-in `node:sqlite`).
 > unless you pass the flag. CI runs 22.13.0 and 24.x to keep this honest.
 
 ```bash
-git clone https://github.com/<you>/ccr-toolkit.git
+npm install -g ccr-toolkit    # or just run it: npx ccr-toolkit
+ccr-toolkit                   # run the whole sweep, get one verdict
+```
+
+Or from source:
+
+```bash
+git clone https://github.com/acrot0/ccr-toolkit.git
 cd ccr-toolkit
 npm install        # dev dependency: vitest
+node src/cli.mjs   # same sweep, no global install
 ```
 
 No runtime dependencies.

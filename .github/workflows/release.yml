@@ -1,0 +1,68 @@
+name: Release
+
+# Publishes to npm when a v* tag is pushed. The full test suite runs first —
+# a release that skips its own tests is worse than no release.
+#
+# workflow_dispatch with dry_run: true rehearses the entire pipeline (tests,
+# tag/version agreement, packed tarball contents) without publishing. That is
+# the only way to exercise this workflow before the first release exists.
+#
+# One-time setup before the first tagged release:
+#   repo Settings → Secrets and variables → Actions → New repository secret
+#   NPM_TOKEN = an npm access token with publish rights for the package.
+# npm provenance additionally requires the package.json `repository` field to
+# point at this repo (it is verified against the OIDC claims).
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run everything except the final publish step'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write # npm provenance attestation
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24.x'
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm ci
+
+      - run: npm test
+
+      - name: Tag agrees with package.json version
+        # A v0.3.0 tag that publishes 0.2.0 silently ships the wrong code and
+        # burns the version. Fail loudly instead.
+        if: github.ref_type == 'tag'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag says v$tag but package.json says $pkg"
+            exit 1
+          fi
+          echo "OK: tag v$tag == package.json $pkg"
+
+      - name: Verify packed tarball
+        # Guards the `files` field: whatever npm would ship is printed here, so
+        # a missing src file or an accidentally bundled directory is visible in
+        # the log before it is published rather than after.
+        run: npm pack --dry-run
+
+      - name: Publish to npm
+        if: ${{ !inputs.dry_run }}
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
