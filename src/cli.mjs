@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * ccr — one entry point for the whole toolkit
+ * ccr-toolkit — one entry point for the whole toolkit
  *
  * Usage:
  *   node src/cli.mjs                  # run every check, summarize
@@ -91,13 +91,13 @@ function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
 
   if (args.list) {
-    console.log('ccr — read-only tools for Claude Code Router\n');
+    console.log('ccr-toolkit — read-only tools for Claude Code Router\n');
     for (const [name, file] of Object.entries(COMMANDS)) {
       const sweep = DEFAULT_SWEEP.includes(name) ? '' : '  (opt-in)';
       console.log(`  ${name.padEnd(10)} ${file}${sweep}`);
     }
-    console.log('\n  ccr                run the default sweep and summarize');
-    console.log('  ccr <tool> [...]   run one tool with its own flags');
+    console.log('\n  ccr-toolkit                run the default sweep and summarize');
+    console.log('  ccr-toolkit <tool> [...]   run one tool with its own flags');
     process.exit(0);
   }
 
@@ -132,8 +132,8 @@ function main(argv = process.argv.slice(2)) {
 
   if (s.attention.length > 0) {
     console.log('\n  Needs attention:');
-    for (const a of s.attention) console.log(`    ccr ${a.name}`);
-    console.log('\n  Run one on its own for the full detail, e.g. `ccr doctor`.');
+    for (const a of s.attention) console.log(`    ccr-toolkit ${a.name}`);
+    console.log('\n  Run one on its own for the full detail, e.g. `ccr-toolkit doctor`.');
   }
   console.log(`\n  Overall: ${icon[s.level]} ${s.level.toUpperCase()}`);
   process.exit(s.level === 'fail' ? 1 : 0);

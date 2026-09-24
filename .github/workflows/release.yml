@@ -1,0 +1,114 @@
+name: Release
+
+# Publishes to npm when a v* tag is pushed. The full test suite runs first —
+# a release that skips its own tests is worse than no release.
+#
+# workflow_dispatch with dry_run: true rehearses the entire pipeline (tests,
+# tag/version agreement, packed tarball contents) without publishing. That is
+# the only way to exercise this workflow before the first release exists.
+#
+# ── Authentication ────────────────────────────────────────────────────────
+#
+# The publish step prefers trusted publishing (OIDC): npm detects the GitHub
+# Actions OIDC environment and authenticates with a short-lived, workflow-bound
+# token. No long-lived secret to leak or rotate.
+#
+# Trusted publishing cannot bootstrap a package. npm's implementation exchanges
+# the OIDC token at
+#   POST /-/npm/v1/oidc/token/exchange/package/<package-name>
+# — the exchange is scoped to a package that must already exist and already
+# have a trusted publisher configured for it. There is no registry endpoint for
+# "publish a brand-new package via OIDC", so the FIRST release goes out with a
+# token and every release after it uses OIDC.
+#
+# One-time setup, in this order:
+#
+#   1. First release only: repo Settings → Secrets and variables → Actions →
+#      New repository secret, NPM_TOKEN = an npm token with publish rights.
+#      (Or publish the first version by hand with `npm publish --access public`
+#      and skip the secret entirely — same result, fewer moving parts.)
+#   2. After the package exists: npmjs.com → the package → Settings →
+#      Trusted Publisher → GitHub Actions, with
+#        Organization or user: acrot0
+#        Repository:           ccr-toolkit
+#        Workflow filename:    release.yml
+#        Allowed actions:      npm publish
+#   3. Delete the NPM_TOKEN secret. It is no longer read, and leaving a
+#      publish-capable token in the repo is the exact risk OIDC removes.
+#
+# Why bother: npm is retiring long-lived publish tokens. Granular access tokens
+# configured to bypass 2FA lost the ability to perform sensitive account and
+# package operations in August 2026, and lose the ability to publish directly
+# around January 2027 — their publishing surface shrinks to reading private
+# packages and staging a publish that a human must approve with 2FA. OIDC is
+# the replacement npm points at, so this workflow is written for it now rather
+# than migrated later under a deadline.
+#
+# npm provenance also requires package.json `repository` to point at this repo;
+# it is verified against the OIDC claims.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run everything except the final publish step'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write # OIDC: both trusted publishing and the provenance attestation
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24.x'
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm ci
+
+      - run: npm test
+
+      - name: Tag agrees with package.json version
+        # A v0.3.0 tag that publishes 0.2.0 silently ships the wrong code and
+        # burns the version. Fail loudly instead.
+        if: github.ref_type == 'tag'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag says v$tag but package.json says $pkg"
+            exit 1
+          fi
+          echo "OK: tag v$tag == package.json $pkg"
+
+      - name: Verify packed tarball
+        # Guards the `files` field: whatever npm would ship is printed here, so
+        # a missing src file or an accidentally bundled directory is visible in
+        # the log before it is published rather than after.
+        run: npm pack --dry-run
+
+      - name: Publish to npm
+        if: ${{ !inputs.dry_run }}
+        # The secret is handed to the shell as NPM_TOKEN — a name npm does not
+        # read — and promoted to NODE_AUTH_TOKEN only when it is non-empty. A
+        # missing secret therefore never reaches npm as a defined-but-empty
+        # token, so npm falls through to its OIDC path and authenticates with
+        # trusted publishing. No reliance on how npm treats an empty token.
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "$NPM_TOKEN" ]; then
+            echo "Authenticating with NPM_TOKEN (bootstrap release)."
+            export NODE_AUTH_TOKEN="$NPM_TOKEN"
+          else
+            echo "No NPM_TOKEN set — authenticating with trusted publishing (OIDC)."
+          fi
+          npm publish --provenance --access public

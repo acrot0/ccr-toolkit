@@ -4,11 +4,19 @@
   "description": "Read-only audit tools for Claude Code Router: failure diagnosis, prompt-cache hit rate, gateway health, and silent config-takeover risk",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/acrot0/ccr-toolkit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/acrot0/ccr-toolkit/issues"
+  },
+  "homepage": "https://github.com/acrot0/ccr-toolkit#readme",
   "engines": {
     "node": ">=22.13.0"
   },
   "bin": {
-    "ccr": "./src/cli.mjs",
+    "ccr-toolkit": "./src/cli.mjs",
     "ccr-cache": "./src/cache-monitor.mjs",
     "ccr-check": "./src/ccr-check.mjs",
     "ccr-takeover": "./src/ccr-takeover-audit.mjs",

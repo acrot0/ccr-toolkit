@@ -1,3 +1,8 @@
 node_modules/
 *.log
 .DS_Store
+
+# Session telemetry written by the agent harness that works in this directory —
+# compact snapshots and per-agent cost logs. Byproducts, not project content.
+docs/maintain-logs/
+memory/
