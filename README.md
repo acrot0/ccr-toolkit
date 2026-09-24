@@ -1,22 +1,23 @@
 # ccr-toolkit
 
-Five read-only audit tools for [Claude Code Router](https://github.com/musistudio/claude-code-router) (CCR).
+Six read-only audit tools for [Claude Code Router](https://github.com/musistudio/claude-code-router) (CCR).
 
-They answer five questions CCR itself does not:
+They answer six questions CCR itself does not:
 
 1. **Why did that request fail?** → `ccr-doctor`
 2. **Where exactly did it fail?** → `ccr-trace`
-3. **Is my prompt cache actually working?** → `ccr-cache`
-4. **Is my gateway config healthy?** → `ccr-check`
-5. **Will CCR silently overwrite my agent's config with a broken snapshot?** → `ccr-takeover`
+3. **What did the request body actually contain?** → `ccr-body`
+4. **Is my prompt cache actually working?** → `ccr-cache`
+5. **Is my gateway config healthy?** → `ccr-check`
+6. **Will CCR silently overwrite my agent's config with a broken snapshot?** → `ccr-takeover`
 
-All five are **read-only**. They open databases with `readOnly: true` and never write to your config.
+All six are **read-only**. They open databases with `readOnly: true` and never write to your config.
 
 ---
 
 ## Why this exists
 
-CCR is a local model gateway. It routes Claude Code (and other agents) through whichever upstream you configure. Five problems are invisible from inside it:
+CCR is a local model gateway. It routes Claude Code (and other agents) through whichever upstream you configure. Six problems are invisible from inside it:
 
 ### 0. The error message is empty, and the explanation is sitting right there
 
@@ -72,7 +73,13 @@ request and surfaces none of it. `ccr-trace` reads it — see the [usage
 section](#ccr-trace--replay-a-request-through-the-gateway-hop-by-hop) for why
 the hop number is the part that tells you what to fix.
 
-### 2. Cache hit rate is a number you can't read
+### 2. The body you need to read has had its middle cut out
+
+The largest requests are both the most likely to be folded and the most likely
+to fail — so the evidence you need is gone exactly when you need it, and nothing
+flags it. `ccr-body` recovers what survives. See [usage](#ccr-body--what-the-request-body-still-says).
+
+### 3. Cache hit rate is a number you can't read
 
 A 0% cache hit rate can look identical to a 99% one — the request succeeds either way, only the bill differs. And the number is easy to misread:
 
@@ -82,11 +89,11 @@ A 0% cache hit rate can look identical to a 99% one — the request succeeds eit
 
 `ccr-cache` reads CCR's `usage.sqlite` and reports the rate per `provider|model`, auto-detecting the reporting convention per row.
 
-### 3. Config drift is silent
+### 4. Config drift is silent
 
 `ccr-check` catches the failure modes that produce no error message: a fallback mode of `off` (429s go straight to the client), empty model slots, SQLite files that are 98% free pages, and request bodies that CCR folded into a preview (breaking forensics).
 
-### 4. Takeover can break another agent without warning
+### 5. Takeover can break another agent without warning
 
 This is the one with no upstream fix.
 
@@ -214,6 +221,43 @@ It also surfaces two things nothing else in the toolchain reads:
   all on a 429 means `Router.fallback` is set to `off`. A `network-error` with
   `retryDelayMs: 0` is reported as what it is (a dropped connection), not as a
   backoff that never happened.
+
+### `ccr-body` — what the request body still says
+
+```bash
+node src/body-salvage.mjs                 # every failing request
+node src/body-salvage.mjs --id 2088
+node src/body-salvage.mjs --since 24h
+node src/body-salvage.mjs --all           # include successful requests
+node src/body-salvage.mjs --json
+```
+
+CCR folds request bodies over 160KB into a "preview": it cuts the middle out and
+splices in ` ... N bytes omitted from preview ... `. That marker breaks the JSON,
+and `request_body_truncated` stays `0` — so the body looks intact and parses as
+nothing.
+
+**Measured on a real install: 96% of stored bodies are folded this way.** The
+bodies most likely to be folded are the large ones, which are also the ones most
+likely to fail.
+
+The fold keeps the head and the tail, and `model` is a top-level key that sits
+in the head — so it survives every fold. Measured: **300 of 300 folded bodies
+yielded it.**
+
+That one fact answers the single most common gateway failure report,
+*"Missing model in request body"* (28 open issues upstream, 274 comments):
+
+```
+#2088  [tokenrhythm::anthropic_messages]  HTTP 400  stored 947776B
+  body folded: 783936 bytes omitted from the middle
+  model: "deepseek-flash"
+  → The client DID send model="deepseek-flash" — the fault is downstream
+    of the client, not a missing field.
+```
+
+It reports `model-absent` only when a body exists *and* carries no model — never
+from an absent body, because "no evidence" and "no model" are different facts.
 
 ### `ccr-cache` — prompt cache hit rate
 

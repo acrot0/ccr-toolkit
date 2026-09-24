@@ -1,23 +1,40 @@
 {
   "name": "ccr-toolkit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Read-only audit tools for Claude Code Router: failure diagnosis, prompt-cache hit rate, gateway health, and silent config-takeover risk",
   "type": "module",
   "license": "MIT",
-  "engines": { "node": ">=22.13.0" },
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "bin": {
     "ccr-cache": "./src/cache-monitor.mjs",
     "ccr-check": "./src/ccr-check.mjs",
     "ccr-takeover": "./src/ccr-takeover-audit.mjs",
     "ccr-doctor": "./src/ccr-doctor.mjs",
-    "ccr-trace": "./src/trace-view.mjs"
+    "ccr-trace": "./src/trace-view.mjs",
+    "ccr-body": "./src/body-salvage.mjs"
   },
   "scripts": {
     "test": "vitest run --pool=forks",
     "test:watch": "vitest"
   },
-  "files": ["src", "README.md", "LICENSE"],
-  "keywords": ["claude-code", "claude-code-router", "ccr", "prompt-cache", "audit", "observability", "diagnostics", "troubleshooting"],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "keywords": [
+    "claude-code",
+    "claude-code-router",
+    "ccr",
+    "prompt-cache",
+    "audit",
+    "observability",
+    "diagnostics",
+    "troubleshooting"
+  ],
   "devDependencies": {
     "vitest": "^3.2.1"
   }
