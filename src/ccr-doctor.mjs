@@ -6,10 +6,9 @@
  *   node src/ccr-doctor.mjs [--json] [--since 7d] [--limit 20]
  *
  * Why it exists: CCR records everything needed to diagnose a failure and then
- * analyses none of it. Measured on a real local install, of the failures that
- * carried a captured response body, CCR's own `error` column was empty for
- * three out of four — the upstream's actual explanation sat unread in
- * `response_body_text` the whole time.
+ * analyses none of it. Measured on a real local install: four of seven failures
+ * carried an empty `error` column, and in all four the upstream's actual
+ * explanation sat unread in `response_body_text` the whole time.
  *
  * The four questions this answers:
  *   1. What actually failed?          -> extractUpstreamError / classifyFailure

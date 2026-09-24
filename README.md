@@ -25,9 +25,10 @@ the upstream's response in `response_body_text` — and then never reads it. The
 `error` column it shows you is a different thing entirely, and is frequently
 blank.
 
-Measured on a real install: three of seven failures carried an empty `error`
-column, while the upstream's actual explanation — *"Can only get item pairs from
-a mapping"*, *"请求包含未知字段"*, *"请求过于频繁"* — sat unread in the body.
+Measured on a real install: **four of seven failures carried an empty `error`
+column — and in all four, the upstream's actual explanation was sitting unread
+in the body.** *"Can only get item pairs from a mapping"*, *"请求包含未知字段"*,
+*"请求过于频繁"*: all captured, none surfaced.
 
 `ccr-doctor` reads the body, names the fault, and tells you what to do about it:
 
