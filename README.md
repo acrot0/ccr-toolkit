@@ -1,22 +1,64 @@
 # ccr-toolkit
 
-Three read-only audit tools for [Claude Code Router](https://github.com/musistudio/claude-code-router) (CCR).
+Four read-only audit tools for [Claude Code Router](https://github.com/musistudio/claude-code-router) (CCR).
 
-They answer three questions CCR itself does not:
+They answer four questions CCR itself does not:
 
-1. **Is my prompt cache actually working?** → `ccr-cache`
-2. **Is my gateway config healthy?** → `ccr-check`
-3. **Will CCR silently overwrite my agent's config with a broken snapshot?** → `ccr-takeover`
+1. **Why did that request fail?** → `ccr-doctor`
+2. **Is my prompt cache actually working?** → `ccr-cache`
+3. **Is my gateway config healthy?** → `ccr-check`
+4. **Will CCR silently overwrite my agent's config with a broken snapshot?** → `ccr-takeover`
 
-All three are **read-only**. They open databases with `readOnly: true` and never write to your config.
+All four are **read-only**. They open databases with `readOnly: true` and never write to your config.
 
 ---
 
 ## Why this exists
 
-CCR is a local model gateway. It routes Claude Code (and other agents) through whichever upstream you configure. Three problems are invisible from inside it:
+CCR is a local model gateway. It routes Claude Code (and other agents) through whichever upstream you configure. Four problems are invisible from inside it:
 
-### 1. Cache hit rate is a lie you can't see
+### 0. The error message is empty, and the explanation is sitting right there
+
+CCR logs every request to `request-logs.sqlite`. When a request fails it records
+the upstream's response in `response_body_text` — and then never reads it. The
+`error` column it shows you is a different thing entirely, and is frequently
+blank.
+
+Measured on a real install: three of seven failures carried an empty `error`
+column, while the upstream's actual explanation — *"Can only get item pairs from
+a mapping"*, *"请求包含未知字段"*, *"请求过于频繁"* — sat unread in the body.
+
+`ccr-doctor` reads the body, names the fault, and tells you what to do about it:
+
+```
+#2450  2026-09-24T11:57:38Z  [tierflow::openai_chat_completions]  HTTP 400  → tool-pairing
+      cause:  An assistant turn carries a tool_use with no matching tool_result (an orphaned block).
+      action: The upstream rejects unpaired tool blocks. A gateway-side cleaner that strips or
+              re-pairs them fixes this — check whether one is installed and whether it is
+              enabled for this provider.
+      upstream said: "The provided messages input is invalid. The error info is
+                      [Can only get item pairs from a mapping.]."
+```
+
+It also answers the two questions that make a gateway look flaky when it is not:
+
+- **Did the model name survive routing?** CCR sometimes resolves to an internal
+  `<provider>::<protocol>/<model>` form. Anything keying off the model string —
+  cache identity, pricing, per-model routing — silently stops matching.
+- **Is the cache actually regressing?** A miss is invisible: the request
+  succeeds either way, only the bill differs. But most "cache is broken" reports
+  are wrong, because a *new session* is supposed to start cold. `ccr-doctor`
+  only flags a regression when the prefix stayed the same size and the cache
+  vanished anyway. On the machine this was built against, that check reports
+  healthy on two paths whose raw hit rates are 98.8% and 90.2% — the naive
+  "does the rate flip?" detector called both of them broken.
+
+> **The measured false positives are in the tests.** `test/ccr-doctor.test.mjs`
+> carries the exact row sequences that a naive detector gets wrong — the
+> 465K-prefix session ending, the fresh 40K session starting — so the check
+> cannot regress into crying wolf again.
+
+### 1. Cache hit rate is a number you can't read
 
 A 0% cache hit rate can look identical to a 99% one — the request succeeds either way, only the bill differs. And the number is easy to misread:
 
@@ -75,6 +117,47 @@ No runtime dependencies.
 
 ## Usage
 
+### `ccr-doctor` — why did it fail?
+
+```bash
+node src/ccr-doctor.mjs                     # last 7d, 20 failures
+node src/ccr-doctor.mjs --since 24h
+node src/ccr-doctor.mjs --json              # machine-readable, for CI or a dashboard
+node src/ccr-doctor.mjs --limit 100
+```
+
+Reads `request-logs.sqlite`, extracts the upstream's own explanation from the
+captured response body, and classifies each failure into a named fault with a
+concrete next action.
+
+**Failure classes:** `tool-pairing` · `unknown-field` · `rate-limited` ·
+`client-abort` · `auth` · `upstream-5xx` · `bad-request` · `opaque`
+
+`opaque` is the one worth watching — it means CCR recorded a failure with
+nothing a human can act on. That happens when the body was never captured, or
+when it was folded into a preview (bodies over 160KB get an elision marker
+spliced into the middle, which is exactly the size of request most likely to
+fail). `ccr-check` reports the preview rate; `ccr-doctor` reports the
+consequence.
+
+Three checks run alongside the failure list:
+
+| Check | What a warning means |
+|---|---|
+| `silentFailures` | A large share of failures carried no usable message |
+| `cacheStability` | The cache regressed **on an unchanged prefix** — an injected block is being edited between requests. A new session starting cold does *not* trigger this. |
+| `modelResolution` | A **successful** request resolved to an internal `<provider>::<protocol>/<model>` id, so anything keying off the model string stops matching |
+
+Exit code `1` only on a `fail`-level finding; warnings do not break automation.
+
+> **Why `cacheStability` is conservative.** The obvious detector — "does the hit
+> rate flip on and off?" — flags healthy gateways. Measured against this
+> machine: it reported two paths as oscillating whose real hit rates are 98.8%
+> and 90.2%. The flips were new sessions legitimately starting cold (a 465K-token
+> prefix ending, a fresh 40K one beginning). This check instead compares each
+> miss against the last prefix that *did* hit, and only fires when the size
+> barely moved. Those exact row sequences are in the test suite.
+
 ### `ccr-cache` — prompt cache hit rate
 
 ```bash
@@ -100,10 +183,10 @@ Checks fallback mode, profile slots, database bloat, request-body preview loss, 
 ### `ccr-takeover` — config takeover risk
 
 ```bash
-node src/ccr-takeover.mjs
-node src/ccr-takeover.mjs --json
-node src/ccr-takeover.mjs --profile myagent=~/.myagent/config.json:zcode
-node src/ccr-takeover.mjs --expect-opencode-model your-main-model
+node src/ccr-takeover-audit.mjs
+node src/ccr-takeover-audit.mjs --json
+node src/ccr-takeover-audit.mjs --profile myagent=~/.myagent/config.json:zcode
+node src/ccr-takeover-audit.mjs --expect-opencode-model your-main-model
 ```
 
 Exit code `1` if a snapshot CCR would actually restore is unhealthy.

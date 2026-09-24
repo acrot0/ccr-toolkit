@@ -60,11 +60,37 @@ jobs:
         # filesystem with no CCR on it.
         run: |
           set -e
-          for tool in src/cache-monitor.mjs src/ccr-check.mjs src/ccr-takeover-audit.mjs; do
+          for tool in src/cache-monitor.mjs src/ccr-check.mjs src/ccr-takeover-audit.mjs src/ccr-doctor.mjs; do
             echo "--- $tool"
             node "$tool" --json > /dev/null
             echo "    exit=$? (0 = degraded gracefully)"
           done
+
+      - name: Doctor still names faults on a real-shaped log
+        # Guards against the opposite failure from the takeover test: a doctor
+        # that reports "all clear" no matter what it is fed. This fixture is a
+        # verbatim-shaped capture of a real 400 whose explanation lived in
+        # response_body_text while CCR's own `error` column was empty.
+        shell: bash
+        run: |
+          set -e
+          out="$(node --input-type=module -e '
+            import { classifyFailure, extractUpstreamError } from "./src/ccr-doctor.mjs";
+            const body = JSON.stringify({ error: { message: "The provided messages input is invalid. The error info is [Can only get item pairs from a mapping.].", type: "invalid_request_error", code: "invalid_parameter_error" } });
+            const d = classifyFailure({ status_code: 400, error: "", response_body_text: body, route_attempt_count: 1 });
+            const e = extractUpstreamError(body);
+            console.log(JSON.stringify({ cls: d.class, hasAction: Boolean(d.action), msg: e.message }));
+          ')"
+          echo "$out"
+          echo "$out" | node -e '
+            let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+              const r = JSON.parse(s);
+              if (r.cls !== "tool-pairing") { console.error(`expected tool-pairing, got ${r.cls}`); process.exit(1); }
+              if (!r.hasAction) { console.error("no action produced"); process.exit(1); }
+              if (!r.msg || !r.msg.includes("item pairs")) { console.error("upstream message not extracted"); process.exit(1); }
+              console.log("OK: fault named, action produced, upstream message extracted");
+            });
+          '
 
       - name: Threat detection still fires on a broken snapshot
         # Guards the core rule end to end: a managed-and-broken snapshot must be
