@@ -19,9 +19,9 @@ jobs:
         # behind the flag until 22.13.0). 24.x is the current LTS line.
         node: ['22.13.0', '24.x']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
 
@@ -47,8 +47,8 @@ jobs:
     name: smoke test (real gateway, ubuntu)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '24.x'
       - run: npm ci
