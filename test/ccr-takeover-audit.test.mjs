@@ -25,6 +25,7 @@ import {
   auditCandidates,
   profileFromManifestEntry,
   discoverProfiles,
+  exitCodeFor,
 } from "../src/ccr-takeover-audit.mjs";
 
 const ID = "claude-code-router";
@@ -277,5 +278,30 @@ describe("discoverProfiles", () => {
     const out = discoverProfiles("/nonexistent-ccr-home");
     expect(out.some((p) => p.kind === "zcode")).toBe(true);
     expect(out.some((p) => p.kind === "opencode")).toBe(true);
+  });
+});
+
+describe("exitCodeFor", () => {
+  // Regression guard. The exit code was once computed only inside the
+  // human-readable branch, so `--json` — the mode automation uses — always
+  // exited 0 and the CI gate silently passed on a real threat.
+  it("should return 1 when a profile is a threat", () => {
+    expect(exitCodeFor([{ status: "threat" }])).toBe(1);
+  });
+
+  it("should return 1 when the restore source would be picked but is unhealthy", () => {
+    expect(exitCodeFor([{ status: "pick-bad" }])).toBe(1);
+  });
+
+  it("should return 1 when any profile among many is a threat", () => {
+    expect(exitCodeFor([{ status: "ok" }, { status: "inert" }, { status: "threat" }])).toBe(1);
+  });
+
+  it("should return 0 when every profile is clean", () => {
+    expect(exitCodeFor([{ status: "ok" }, { status: "inert" }])).toBe(0);
+  });
+
+  it("should return 0 when there are no profiles at all", () => {
+    expect(exitCodeFor([])).toBe(0);
   });
 });

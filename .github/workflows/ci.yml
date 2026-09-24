@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        # 22.5.0 is the first release with node:sqlite; 24.x is the current LTS line.
+        node: ['22.5.0', '24.x']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Assert line endings are LF
+        # Not cosmetic. On Windows with core.autocrlf=true a clone rewrites these
+        # files to CRLF, and the vitest/esbuild transform then fails to parse them
+        # with "SyntaxError: Invalid or unexpected token". .gitattributes prevents
+        # it; this step fails loudly if that ever regresses.
+        shell: bash
+        run: |
+          if grep -rlU $'\r' src test 2>/dev/null | head -1 | grep -q .; then
+            echo "::error::CRLF line endings found in src/ or test/ — .gitattributes is not being honoured"
+            grep -rlU $'\r' src test
+            exit 1
+          fi
+          echo "OK: all source files use LF"
+
+      - run: npm ci
+
+      - run: npm test
+
+  smoke:
+    name: smoke test (real gateway, ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+      - run: npm ci
+
+      - name: Tools run and exit cleanly with no gateway present
+        # The tools are read-only and must degrade gracefully when CCR is not
+        # installed — they should report the absence, not crash. This is the
+        # failure mode a unit test cannot reach, because it needs a real
+        # filesystem with no CCR on it.
+        run: |
+          set -e
+          for tool in src/cache-monitor.mjs src/ccr-check.mjs src/ccr-takeover-audit.mjs; do
+            echo "--- $tool"
+            node "$tool" --json > /dev/null
+            echo "    exit=$? (0 = degraded gracefully)"
+          done
+
+      - name: Threat detection still fires on a broken snapshot
+        # Guards the core rule end to end: a managed-and-broken snapshot must be
+        # reported and must produce exit code 1. If this stops firing the tool
+        # has silently become a rubber stamp.
+        shell: bash
+        run: |
+          set -e
+          # RUNNER_TEMP is GitHub's own per-job temp dir — consistent across
+          # runners, unlike mktemp paths that differ between Git Bash and node.
+          fixture="$RUNNER_TEMP/ccr-fixture/config.json"
+          mkdir -p "$(dirname "$fixture")"
+          cat > "$fixture" <<'JSON'
+          {
+            "provider": { "claude-code-router": { "name": "CCR" } },
+            "hooks": { "events": {
+              "PreToolUse":  [{"hooks":[{"command":"python","args":["~/.zcode/hooks/ok.py"]}]}],
+              "SessionStart":[{"hooks":[{"command":"python","args":["~/.zcode/hooks/ok.py"]}]}],
+              "PostToolUse": [{"hooks":[{"command":"python","args":["~/.zcode/hooks/ok.py"]}]}],
+              "Stop":        [{"hooks":[{"command":"python","args":["~/.zcode/hooks/ok.py"]}]}]
+            }}
+          }
+          JSON
+          cat > "$fixture.ccr-backup-2026-01-01T00-00-00-000Z" <<'JSON'
+          {
+            "provider": { "claude-code-router": { "name": "CCR" } },
+            "hooks": { "events": {
+              "PreToolUse": [{"hooks":[{"command":"python","args":["~/.claude/hooks/gone.py"]}]}]
+            }}
+          }
+          JSON
+
+          set +e
+          out="$(node src/ccr-takeover-audit.mjs --profile "fixture=$fixture:zcode" --json)"
+          code=$?
+          set -e
+
+          echo "$out"
+          if [ "$code" -ne 1 ]; then
+            echo "::error::expected exit code 1 for a managed-and-broken snapshot, got $code"
+            exit 1
+          fi
+          # Assert on the profile's threat count, not on an arbitrary candidate:
+          # the fixture also holds an inert (unmanaged, broken) snapshot whose
+          # "threat" field is correctly false.
+          echo "$out" | node -e '
+            let s = "";
+            process.stdin.on("data", (d) => (s += d)).on("end", () => {
+              const profiles = JSON.parse(s);
+              const f = profiles.find((p) => p.label === "fixture");
+              if (!f) { console.error("fixture profile not found in output"); process.exit(1); }
+              if (f.threats.length !== 1) {
+                console.error(`expected exactly 1 threat, got ${f.threats.length}`);
+                process.exit(1);
+              }
+              if (f.status !== "threat") {
+                console.error(`expected status=threat, got ${f.status}`);
+                process.exit(1);
+              }
+              console.log("OK: 1 threat reported, status=threat");
+            });
+          '
+          echo "OK: broken snapshot detected, exit code 1"

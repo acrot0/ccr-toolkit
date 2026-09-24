@@ -322,6 +322,16 @@ export function discoverProfiles(ccrHome, extra = []) {
   return out;
 }
 
+/**
+ * Exit code for a completed audit. Extracted as a pure function because the
+ * bug it prevents is invisible: the exit code was once computed only inside the
+ * human-readable branch, so `--json` — the mode automation actually uses —
+ * always exited 0 and the gate silently passed.
+ */
+export function exitCodeFor(profiles) {
+  return profiles.some((p) => p.status === "threat" || p.status === "pick-bad") ? 1 : 0;
+}
+
 function auditAll(opts = {}) {
   const ccrHome = locateCcrHome();
   const profiles = discoverProfiles(ccrHome, opts.profiles || []);
@@ -381,6 +391,9 @@ if (isMain) {
   const opts = parseArgs(process.argv.slice(2));
   const r = auditAll(opts);
 
+  // Computed for BOTH output modes — see exitCodeFor for why that matters.
+  const code = exitCodeFor(r);
+
   if (opts.json) {
     console.log(JSON.stringify(r, null, 1));
   } else {
@@ -388,7 +401,6 @@ if (isMain) {
     if (r.length === 0) {
       console.log("\n  No CCR-managed profile found (or pass --profile <label>=<path>[:kind])");
     }
-    let bad = 0;
     for (const p of r) {
       console.log("");
       console.log(`── ${p.label} ──`);
@@ -411,8 +423,7 @@ if (isMain) {
               ? "  THREAT: fix required"
               : "  THREAT: restore source would be picked but is unhealthy",
       );
-      if (p.status === "threat" || p.status === "pick-bad") bad++;
     }
-    process.exit(bad ? 1 : 0);
   }
+  process.exit(code);
 }
