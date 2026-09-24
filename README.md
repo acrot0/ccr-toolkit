@@ -59,6 +59,10 @@ It also answers the two questions that make a gateway look flaky when it is not:
 > carries the exact row sequences that a naive detector gets wrong — the
 > 465K-prefix session ending, the fresh 40K session starting — so the check
 > cannot regress into crying wolf again.
+>
+> **Background reading:** [The gateway knows why it failed. It just won't tell you.](docs/the-gateway-knows-why-it-failed.md)
+> — the full failure table, the hop chain, and how a cache check that flagged
+> two healthy providers (98.8% and 90.2%) got fixed.
 
 ### 1. The error says *what*; nothing says *where*
 
