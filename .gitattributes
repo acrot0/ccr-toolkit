@@ -1,0 +1,20 @@
+# Force LF in the repository for every text file.
+#
+# Why this matters here: on Windows with `core.autocrlf=true` (the Git for
+# Windows default), a fresh clone rewrites every LF to CRLF. These source files
+# contain non-ASCII text in comments, and the vitest/esbuild transform step
+# fails with "SyntaxError: Invalid or unexpected token" on the CRLF form while
+# the LF form parses fine — the same commit, the same toolchain, only the line
+# endings differ. Verified by cloning this repo and running the suite.
+#
+# `text=auto eol=lf` normalises on commit and checks out as LF regardless of
+# the user's autocrlf setting, so the clone matches what the tests were written
+# against.
+* text=auto eol=lf
+
+# Binary files must never be normalised.
+*.png binary
+*.jpg binary
+*.ico binary
+*.gz binary
+*.zip binary
