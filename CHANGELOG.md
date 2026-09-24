@@ -6,6 +6,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-09-25
+
+First release published from CI. The code is 0.2.0's; what changed is how it
+gets to npm.
+
 ### Added
 
 - Release workflow: pushing a `v*` tag runs the full test suite, verifies the
