@@ -1,7 +1,7 @@
 # ccr-toolkit
 
 [![CI](https://github.com/acrot0/ccr-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/acrot0/ccr-toolkit/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-195%20passing-brightgreen)](test/)
+[![tests](https://img.shields.io/badge/tests-206%20passing-brightgreen)](test/)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522.13-blue)](https://nodejs.org)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
@@ -368,11 +368,41 @@ Both rules have unit tests that will fail if someone changes them.
 npm test
 ```
 
-103 tests. Each one locks a rule that was learned from a real misdiagnosis — the failure modes they encode all produced *silent* wrong answers, not crashes:
+206 tests. Each one locks a rule that was learned from a real misdiagnosis — the failure modes they encode all produced *silent* wrong answers, not crashes:
 
 - `status=0` rows are a logging gap, not failures. Counting them as failures turns a ~90% success rate into 66.7%.
 - 429s must be clustered into events. 494 raw log lines were only 53 events; reporting the raw count overstates the problem ~10×.
 - A `total`-convention upstream can report `cache_read > input`, which makes `total` impossible — the code falls back to `remainder` instead of silently clamping to 100% and hiding the real gap.
+
+---
+
+## Releasing
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`: tests, a tag/version
+agreement check, a `npm pack --dry-run` listing, then `npm publish --provenance`.
+To rehearse without publishing, run the workflow manually with `dry_run: true`.
+
+**The first release is the awkward one.** Publishing authenticates with
+[trusted publishing](https://docs.npmjs.com/trusted-publishers) (OIDC), which
+is configured from the package's settings page on npmjs.com — a page that does
+not exist until the package does. So the first version goes out with a token,
+and every version after it uses OIDC:
+
+1. **First release** — either publish by hand (`npm publish --access public`,
+   which prompts for 2FA), or add an `NPM_TOKEN` repo secret with publish
+   rights and let the workflow do it.
+2. **Once the package exists** — npmjs.com → the package → Settings →
+   Trusted Publisher → GitHub Actions:
+   `acrot0` / `ccr-toolkit` / `release.yml`, allowed action `npm publish`.
+3. **Delete `NPM_TOKEN`.** The workflow passes it only when it is set, so an
+   absent secret means npm falls through to OIDC. Leaving a publish-capable
+   token in the repo is the exact risk this removes.
+
+This matters now rather than later: npm is retiring long-lived publish tokens.
+Granular access tokens that bypass 2FA lost sensitive account and package
+operations in August 2026, and lose direct publishing around January 2027 —
+their publishing surface shrinks to reading private packages and *staging* a
+publish that a human must approve with 2FA.
 
 ---
 

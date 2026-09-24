@@ -12,6 +12,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   packed tarball against the `files` field, and publishes to npm with
   provenance. `workflow_dispatch` with `dry_run: true` rehearses everything
   short of publishing.
+- The workflow authenticates with **trusted publishing (OIDC)** once the
+  package exists, falling back to an `NPM_TOKEN` secret only for the first
+  release. Trusted publishing cannot bootstrap a package — npm exchanges the
+  OIDC token at a package-scoped endpoint, so the package must already exist
+  and already have a trusted publisher configured. Documented in the workflow
+  header and the README, since the ordering is the non-obvious part.
 
 ### Changed
 
