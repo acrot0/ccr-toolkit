@@ -50,7 +50,11 @@ The behaviour is intentional and the maintainer's answer is "don't use global sc
 
 ## Install
 
-Requires **Node.js ≥ 22.5** (uses the built-in `node:sqlite`).
+Requires **Node.js ≥ 22.13** (uses the built-in `node:sqlite`).
+
+> 22.5.0 introduced `node:sqlite`, but it stayed behind `--experimental-sqlite`
+> until **22.13.0** — on 22.5–22.12 the imports fail with `ERR_UNKNOWN_BUILTIN_MODULE`
+> unless you pass the flag. CI runs 22.13.0 and 24.x to keep this honest.
 
 ```bash
 git clone https://github.com/<you>/ccr-toolkit.git

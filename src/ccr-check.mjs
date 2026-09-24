@@ -232,6 +232,18 @@ function parseArgs(argv) {
   return out;
 }
 
+/**
+ * "CCR is not installed here" is not a configuration fault — it is simply not
+ * applicable. Reporting it as `fail` (and exiting 1) makes the tool unusable in
+ * CI on a machine without CCR, which is exactly where a smoke test runs.
+ */
+export function notInstalled() {
+  return {
+    checks: [{ id: 'config', level: 'warn', detail: 'CCR not found on this machine — nothing to check' }],
+    facts: { ccrInstalled: false },
+  };
+}
+
 function collect() {
   const checks = [];
   const facts = {};
@@ -239,8 +251,10 @@ function collect() {
   // 1+2. config
   const cfgPath = locate('config.sqlite');
   if (!cfgPath) {
-    checks.push({ id: 'config', level: 'fail', detail: 'config.sqlite not found — is CCR installed?' });
-  } else {
+    const empty = notInstalled();
+    return { checks: empty.checks, facts: empty.facts, degraded: true };
+  }
+  {
     const db = openRo(cfgPath);
     try {
       const row = db.prepare("SELECT value_json FROM app_config WHERE key = 'default'").get();
@@ -349,6 +363,8 @@ function main(argv = process.argv.slice(2)) {
 
   if (args.json) {
     console.log(JSON.stringify({ level, checks, facts }, null, 2));
+    // A machine without CCR has nothing wrong with it, so this exits 0 —
+    // otherwise the tool is unusable in CI wherever CCR is not installed.
     process.exit(exitCodeFor(checks));
   }
 
@@ -358,7 +374,11 @@ function main(argv = process.argv.slice(2)) {
   console.log(`\n  Overall: ${icon[level]} ${level.toUpperCase()}`);
   if (facts.providers !== undefined) console.log(`  providers: ${facts.providers}`);
   if (facts.successRate !== undefined) console.log(`  7-day success rate (logging gap excluded): ${facts.successRate.toFixed(1)}%${facts.topFailure ? `; top failure ${facts.topFailure}` : ''}`);
-  if (level !== 'ok') console.log('\n  Tip: back up config.sqlite before changing CCR config; changes need a CCR restart to take effect.');
+  if (facts.ccrInstalled === false) {
+    console.log('\n  Nothing to do — this tool audits a local CCR installation.');
+  } else if (level !== 'ok') {
+    console.log('\n  Tip: back up config.sqlite before changing CCR config; changes need a CCR restart to take effect.');
+  }
   process.exit(exitCodeFor(checks));
 }
 

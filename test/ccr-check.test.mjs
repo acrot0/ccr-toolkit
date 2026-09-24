@@ -11,6 +11,8 @@ import {
   hasPreviewMarker, previewOmittedBytes, PREVIEW_MARKER,
   checkFallback, checkProfile, checkBloat, checkPreviewLoss, checkLoggingGap,
   overallLevel, exitCodeFor, clusterTimestamps, checkRateLimitBursts,
+  notInstalled,
+  exitCodeFor,
 } from "../src/ccr-check.mjs";
 
 describe("preview marker", () => {
@@ -215,5 +217,24 @@ describe("overallLevel / exitCodeFor", () => {
     expect(exitCodeFor([{ level: "warn" }])).toBe(0);
     expect(exitCodeFor([{ level: "fail" }])).toBe(1);
     expect(exitCodeFor([{ level: "ok" }])).toBe(0);
+  });
+});
+
+describe("notInstalled", () => {
+  // Regression guard. Reporting "CCR is not installed" as a `fail` made the
+  // tool exit 1 on any machine without CCR — which is exactly where the CI
+  // smoke test runs, so the tool was unusable precisely where it was needed.
+  it("should report a warning, not a failure", () => {
+    const r = notInstalled();
+    expect(r.checks[0].level).toBe("warn");
+    expect(r.checks[0].level).not.toBe("fail");
+  });
+
+  it("should mark the installation as absent so callers can branch on it", () => {
+    expect(notInstalled().facts.ccrInstalled).toBe(false);
+  });
+
+  it("should exit 0 — nothing is wrong with a machine that has no CCR", () => {
+    expect(exitCodeFor(notInstalled().checks)).toBe(0);
   });
 });

@@ -14,8 +14,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        # 22.5.0 is the first release with node:sqlite; 24.x is the current LTS line.
-        node: ['22.5.0', '24.x']
+        # 22.13.0 is the first release where node:sqlite works WITHOUT
+        # --experimental-sqlite (the module appeared in 22.5.0 but was gated
+        # behind the flag until 22.13.0). 24.x is the current LTS line.
+        node: ['22.13.0', '24.x']
     steps:
       - uses: actions/checkout@v4
 

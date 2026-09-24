@@ -4,7 +4,7 @@
   "description": "Read-only audit tools for Claude Code Router: prompt-cache hit rate, gateway health, and silent config-takeover risk",
   "type": "module",
   "license": "MIT",
-  "engines": { "node": ">=22.5.0" },
+  "engines": { "node": ">=22.13.0" },
   "bin": {
     "ccr-cache": "./src/cache-monitor.mjs",
     "ccr-check": "./src/ccr-check.mjs",
