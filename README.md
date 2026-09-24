@@ -1,5 +1,10 @@
 # ccr-toolkit
 
+[![CI](https://github.com/acrot0/ccr-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/acrot0/ccr-toolkit/actions/workflows/ci.yml)
+[![tests](https://img.shields.io/badge/tests-185%20passing-brightgreen)](test/)
+[![Node](https://img.shields.io/badge/node-%E2%89%A522.13-blue)](https://nodejs.org)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 Six read-only audit tools for [Claude Code Router](https://github.com/musistudio/claude-code-router) (CCR).
 
 They answer six questions CCR itself does not:
