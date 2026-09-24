@@ -1,0 +1,13 @@
+{
+  "_why": "CCR records one model under several spellings in usage_events.model (with a provider prefix, with a build date, with an expiry note). Aggregating cost by the raw string splits one model across several rows and under-reports it. The generic rules (strip provider prefix, strip -expires-on-<date>, strip a trailing 4-digit build date, strip a [1m] marker) handle most cases; this file is only for aliases the generic rules cannot infer.",
+  "_maintain": "To add an alias, edit this file only — no code change needed. The left-hand key is the NORMALIZED name (provider prefix and date suffixes already stripped). The right-hand value is the logical model name you want everything merged into.",
+  "aliases": {},
+  "_not_aliased_example": {
+    "<model>-vision-exp": "A vision-capable variant is a distinct capability — do NOT merge it into the text-only model.",
+    "<model>-v4.1": "v4.1 and v4 are different versions; the generic rules already keep them apart."
+  },
+  "_free_why": "CCR's cost_usd is ESTIMATED from a pricing table (cost_source = models.dev / litellm), not read from a bill. A free provider still gets a positive estimate: measured — one free provider was costed at $10.45 by the litellm table, while another showed $0 only because it had no pricing entry at all. If you do not declare free providers here, the report treats free quota as real spend.",
+  "_free_maintain": "Match by PREFIX. Runtime provider names may carry a suffix, e.g. `myprovider::openai_chat_completions::cred:key-1-1` — listing `myprovider` covers all of them.",
+  "free_providers": [],
+  "free_models": []
+}
