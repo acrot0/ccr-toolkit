@@ -56,6 +56,13 @@ npm install        # dev dependency: vitest
 
 No runtime dependencies.
 
+> **Windows note.** The repo ships a `.gitattributes` that forces LF. This is
+> not cosmetic: with Git for Windows' default `core.autocrlf=true`, a clone
+> rewrites line endings to CRLF, and the vitest/esbuild transform then fails
+> with `SyntaxError: Invalid or unexpected token` on these files. Verified by
+> cloning into a clean directory — LF passes, CRLF fails to parse. Don't remove
+> the file.
+
 ---
 
 ## Usage
