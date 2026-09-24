@@ -8,6 +8,7 @@
     "node": ">=22.13.0"
   },
   "bin": {
+    "ccr": "./src/cli.mjs",
     "ccr-cache": "./src/cache-monitor.mjs",
     "ccr-check": "./src/ccr-check.mjs",
     "ccr-takeover": "./src/ccr-takeover-audit.mjs",

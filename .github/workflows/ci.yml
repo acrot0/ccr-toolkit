@@ -60,7 +60,7 @@ jobs:
         # filesystem with no CCR on it.
         run: |
           set -e
-          for tool in src/cache-monitor.mjs src/ccr-check.mjs src/ccr-takeover-audit.mjs src/ccr-doctor.mjs src/trace-view.mjs src/body-salvage.mjs; do
+          for tool in src/cache-monitor.mjs src/ccr-check.mjs src/ccr-takeover-audit.mjs src/ccr-doctor.mjs src/trace-view.mjs src/body-salvage.mjs src/cli.mjs; do
             echo "--- $tool"
             node "$tool" --json > /dev/null
             echo "    exit=$? (0 = degraded gracefully)"

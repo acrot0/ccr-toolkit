@@ -7,6 +7,25 @@
 
 Six read-only audit tools for [Claude Code Router](https://github.com/musistudio/claude-code-router) (CCR).
 
+```bash
+git clone https://github.com/acrot0/ccr-toolkit.git
+cd ccr-toolkit
+node src/cli.mjs          # run the whole sweep, get one verdict
+```
+
+```
+  ✅ doctor     OK
+  ✅ cache      OK
+  ⚠️  check      WARN
+  ✅ takeover   OK
+
+  3 ok, 1 warn, 0 fail
+  Needs attention:  ccr check
+  Overall: ⚠️  WARN
+```
+
+Then `node src/cli.mjs doctor` for the full detail on whichever needs it.
+
 They answer six questions CCR itself does not:
 
 1. **Why did that request fail?** → `ccr-doctor`
