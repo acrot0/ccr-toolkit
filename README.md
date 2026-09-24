@@ -1,21 +1,22 @@
 # ccr-toolkit
 
-Four read-only audit tools for [Claude Code Router](https://github.com/musistudio/claude-code-router) (CCR).
+Five read-only audit tools for [Claude Code Router](https://github.com/musistudio/claude-code-router) (CCR).
 
-They answer four questions CCR itself does not:
+They answer five questions CCR itself does not:
 
 1. **Why did that request fail?** → `ccr-doctor`
-2. **Is my prompt cache actually working?** → `ccr-cache`
-3. **Is my gateway config healthy?** → `ccr-check`
-4. **Will CCR silently overwrite my agent's config with a broken snapshot?** → `ccr-takeover`
+2. **Where exactly did it fail?** → `ccr-trace`
+3. **Is my prompt cache actually working?** → `ccr-cache`
+4. **Is my gateway config healthy?** → `ccr-check`
+5. **Will CCR silently overwrite my agent's config with a broken snapshot?** → `ccr-takeover`
 
-All four are **read-only**. They open databases with `readOnly: true` and never write to your config.
+All five are **read-only**. They open databases with `readOnly: true` and never write to your config.
 
 ---
 
 ## Why this exists
 
-CCR is a local model gateway. It routes Claude Code (and other agents) through whichever upstream you configure. Four problems are invisible from inside it:
+CCR is a local model gateway. It routes Claude Code (and other agents) through whichever upstream you configure. Five problems are invisible from inside it:
 
 ### 0. The error message is empty, and the explanation is sitting right there
 
@@ -58,7 +59,15 @@ It also answers the two questions that make a gateway look flaky when it is not:
 > 465K-prefix session ending, the fresh 40K session starting — so the check
 > cannot regress into crying wolf again.
 
-### 1. Cache hit rate is a number you can't read
+### 1. The error says *what*; nothing says *where*
+
+Even when a failure does carry a message, it does not tell you which stage of
+the gateway produced it. CCR writes a full 7-to-16 hop forensic chain per
+request and surfaces none of it. `ccr-trace` reads it — see the [usage
+section](#ccr-trace--replay-a-request-through-the-gateway-hop-by-hop) for why
+the hop number is the part that tells you what to fix.
+
+### 2. Cache hit rate is a number you can't read
 
 A 0% cache hit rate can look identical to a 99% one — the request succeeds either way, only the bill differs. And the number is easy to misread:
 
@@ -68,11 +77,11 @@ A 0% cache hit rate can look identical to a 99% one — the request succeeds eit
 
 `ccr-cache` reads CCR's `usage.sqlite` and reports the rate per `provider|model`, auto-detecting the reporting convention per row.
 
-### 2. Config drift is silent
+### 3. Config drift is silent
 
 `ccr-check` catches the failure modes that produce no error message: a fallback mode of `off` (429s go straight to the client), empty model slots, SQLite files that are 98% free pages, and request bodies that CCR folded into a preview (breaking forensics).
 
-### 3. Takeover can break another agent without warning
+### 4. Takeover can break another agent without warning
 
 This is the one with no upstream fix.
 
@@ -157,6 +166,49 @@ Exit code `1` only on a `fail`-level finding; warnings do not break automation.
 > prefix ending, a fresh 40K one beginning). This check instead compares each
 > miss against the last prefix that *did* hit, and only fires when the size
 > barely moved. Those exact row sequences are in the test suite.
+
+### `ccr-trace` — replay a request through the gateway, hop by hop
+
+```bash
+node src/trace-view.mjs                  # most recent failing request
+node src/trace-view.mjs --id 1996
+node src/trace-view.mjs --last 5
+node src/trace-view.mjs --all            # include successful requests
+node src/trace-view.mjs --json
+```
+
+CCR writes a full forensic chain per request: measured, a normal call produces
+**7 hops** and a rate-limited one that retried four times produces **16**. Each
+hop carries the before/after of every field it touched.
+
+```
+#2450  HTTP 400  7 hops
+  📥  0 [ingress   ] request.ingress                ok        0ms
+  📥  1 [ingress   ] gateway.header-normalization   ok        0ms  {remove:/headers/x-api-key, +3}
+  🔀  2 [routing   ] router.route-output            ok        0ms  {replace:/body, +4}
+  ⏭️   3 [planning  ] fallback.execution-plan        noop      0ms
+  ⚙️   4 [capability] provider.capability-routing    ok        0ms  {replace:/body/model, replace:/routing/model}
+  📤  5 [attempt   ] upstream.attempt.prepare       ok        1ms  {remove:/headers/content-length, +1}
+  ❌  6 [outcome   ] upstream.attempt.outcome       error   796ms → HTTP 400
+
+  ❌ failed at hop 6 (upstream.attempt.outcome) with HTTP 400 — at the upstream call
+  🔀 hop 4 rewrote the model: tierflow/tierflow → tierflow::anthropic_messages/tierflow
+```
+
+**Why the hop number matters.** A 400 that fails at hop ≤3 was already malformed
+before the gateway touched it — a client bug. A 400 at hop 6 left the gateway
+intact and came back rejected — a routing or upstream bug. Same status code,
+opposite fix, and the error message does not distinguish them.
+
+It also surfaces two things nothing else in the toolchain reads:
+
+- **The model rewrite** — which hop introduced the internal
+  `<provider>::<protocol>/<model>` form, so you can tell "my config is wrong"
+  from "the gateway transformed it".
+- **The retry ladder** — `1s → 2s → 4s` means a capacity problem; no retry at
+  all on a 429 means `Router.fallback` is set to `off`. A `network-error` with
+  `retryDelayMs: 0` is reported as what it is (a dropped connection), not as a
+  backoff that never happened.
 
 ### `ccr-cache` — prompt cache hit rate
 

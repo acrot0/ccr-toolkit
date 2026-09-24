@@ -9,7 +9,8 @@
     "ccr-cache": "./src/cache-monitor.mjs",
     "ccr-check": "./src/ccr-check.mjs",
     "ccr-takeover": "./src/ccr-takeover-audit.mjs",
-    "ccr-doctor": "./src/ccr-doctor.mjs"
+    "ccr-doctor": "./src/ccr-doctor.mjs",
+    "ccr-trace": "./src/trace-view.mjs"
   },
   "scripts": {
     "test": "vitest run --pool=forks",
